@@ -119,7 +119,8 @@ int loadWeights(Weights &weights, fs::path model_path) {
 void prefill(
   std::queue<std::vector<int>>& queue, std::vector<bool>& is_slot_free,
   int slot, int* gpu_input_tokens,
-  bf16* input_embeddings, Weights& weights
+  bf16* input_embeddings, Weights& weights,
+  bf16* hidden_state, bf16* rms_norms
 ) {
   
   prompt = queue.front();
@@ -129,6 +130,8 @@ void prefill(
 
   cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len*sizeof(int), cudaMemcpyHostToDevice);
   embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
+
+  cudaMemcpy(hidden_state, input_embeddings, prompt_len*E_DIM*sizeof(bf16)), cudaMemcpyHostToDevice);
   
 }
 
