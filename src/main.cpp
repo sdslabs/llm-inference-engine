@@ -5,11 +5,10 @@
 #include <queue>
 #include <filesystem>
 #include <fstream>
-#include <kernel.cu>
+#include "kernels.cuh"
 
 using json = nlohmann::json;
-using bf16 = __nv_bfloat16;
-using fs = std::filesystem;
+namespace fs = std::filesystem;
 
 constexpr int B_TO_MB = 1024*1024;
 constexpr int B_TO_GB = 1024*1024*1024;
@@ -51,12 +50,12 @@ struct Weights {
   bf16* mlp_gate_proj[N_LAYERS];
   bf16* mlp_up_proj[N_LAYERS];
   bf16* mlp_down_proj[N_LAYERS];
-  bf16* post_attn_layernorm[N_LAYERS];
+  bf16* post_attn_layernorms[N_LAYERS];
   bf16* w_q[N_LAYERS];
   bf16* w_k[N_LAYERS];
   bf16* w_v[N_LAYERS];
   bf16* w_o[N_LAYERS];
-  bf16* final_norm;
+  bf16* norm;
 };
 
 int loadWeights(Weights &weights, fs::path model_path) {
@@ -123,15 +122,15 @@ void prefill(
   bf16* hidden_state, bf16* rms_norms
 ) {
   
-  prompt = queue.front();
-  prompt_len = prompt.size();
+  std::vector<int> prompt = queue.front();
+  int prompt_len = prompt.size();
   queue.pop();
   is_slot_free[slot] = false;
 
   cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len*sizeof(int), cudaMemcpyHostToDevice);
   embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
 
-  cudaMemcpy(hidden_state, input_embeddings, prompt_len*E_DIM*sizeof(bf16)), cudaMemcpyHostToDevice);
+  cudaMemcpy(hidden_state, input_embeddings, prompt_len*E_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
   
 }
 
