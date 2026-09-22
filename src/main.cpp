@@ -5,6 +5,7 @@
 #include <queue>
 #include <filesystem>
 #include <fstream>
+#include <kernel.cu>
 
 using json = nlohmann::json;
 using bf16 = __nv_bfloat16;
@@ -15,6 +16,7 @@ constexpr int B_TO_GB = 1024*1024*1024;
 
 // architecture dependent parameters. Read from config later
 constexpr int N_LAYERS = 16;
+constexpr int MAX_PROMPT_LEN = 512;
 
 int checkGPUStatus() {
   int device_count = 0;
@@ -55,7 +57,7 @@ struct Weights {
   bf16* w_v[N_LAYERS];
   bf16* w_o[N_LAYERS];
   bf16* final_norm;
-}
+};
 
 int loadWeights(Weights &weights, fs::path model_path) {
   if(checkGPUStatus()) return 1;
@@ -111,6 +113,23 @@ int loadWeights(Weights &weights, fs::path model_path) {
     weights.w_v[i] = (bf16*)((char *)model_weights + offsets.at("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight"));
   }
 
+  return 0;
+}
+
+void prefill(
+  std::queue<std::vector<int>>& queue, std::vector<bool>& is_slot_free,
+  int slot, int* gpu_input_tokens,
+  bf16* input_embeddings, Weights& weights
+) {
+  
+  prompt = queue.front();
+  prompt_len = prompt.size();
+  queue.pop();
+  is_slot_free[slot] = false;
+
+  cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len*sizeof(int), cudaMemcpyHostToDevice);
+  embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
+  
 }
 
 int main() {
