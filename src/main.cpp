@@ -10,13 +10,6 @@
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-constexpr int B_TO_MB = 1024*1024;
-constexpr int B_TO_GB = 1024*1024*1024;
-
-// architecture dependent parameters. Read from config later
-constexpr int N_LAYERS = 16;
-constexpr int MAX_PROMPT_LEN = 512;
-
 int checkGPUStatus() {
   int device_count = 0;
   cudaGetDeviceCount(&device_count);
@@ -116,24 +109,43 @@ int loadWeights(Weights &weights, fs::path model_path) {
 }
 
 void prefill(
-  std::queue<std::vector<int>>& queue, std::vector<bool>& is_slot_free,
-  int slot, int* gpu_input_tokens,
-  bf16* input_embeddings, Weights& weights,
-  bf16* hidden_state, bf16* rms_norms
+  // request
+  std::vector<int>& prompt, int& prompt_len,
+
+  // persistent, allocated once at startup
+  Weights& weights, cublasHandle_t cublas_handle,
+  bf16* kv_cache,                                       // N_LAYERS x 2 x MAX_PROMPT_LEN x KV_DIM
+  bf16* rope_cos, bf16* rope_sin,                       // MAX_PROMPT_LEN x HEAD_DIM/2
+
+  // residual stream scratch
+  int* gpu_input_tokens,                                // prompt_len
+  bf16* residual,                                       // snapshot taken before each sublayer
+  bf16* hidden_state,                                   // carried across all N_LAYERS
+  bf16* rms_norms,                                      // rmsNorm output, never in place
+
+  // attention scratch
+  bf16* q_proj,                                         // prompt_len x E_DIM
+  bf16* k_proj, bf16* v_proj,                           // prompt_len x KV_DIM, scattered into kv_cache
+  bf16* attn_scores,                                    // NUM_Q_HEADS x prompt_len x prompt_len
+  bf16* attn_out,                                       // scores @ V
+  bf16* o_proj,                                         // after w_o
+
+  // mlp scratch
+  bf16* gate, bf16* up,                                 // prompt_len x INTERMEDIATE_DIM
+  bf16* down,                                           // prompt_len x E_DIM
+
+  // output
+  bf16* logits,                                         // VOCAB_SIZE, last token only
+  std::vector<bf16>& logits_cpu                         // host readback for sampling
 ) {
   
-  std::vector<int> prompt = queue.front();
-  int prompt_len = prompt.size();
-  queue.pop();
-  is_slot_free[slot] = false;
-
   cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len*sizeof(int), cudaMemcpyHostToDevice);
-  embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
+  embeddingGather(gpu_input_tokens, residual, weights.embed_tokens, prompt_len);
 
-  cudaMemcpy(hidden_state, input_embeddings, prompt_len*E_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(hidden_state, residual, prompt_len*E_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
   
 }
 
 int main() {
-  
+  checkGPUStatus();
 }
