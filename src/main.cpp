@@ -5,6 +5,7 @@
 #include <queue>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include "kernels.cuh"
 
 using json = nlohmann::json;
@@ -126,15 +127,19 @@ static bf16* layerV(bf16* slot_cache, int layer) {
   return layerK(slot_cache, layer) + (size_t)MAX_SEQ_LEN * KV_DIM;
 }
 
-static int argmaxRow(const std::vector<bf16>& logits_cpu, int row) {
-  const bf16* p = logits_cpu.data() + (size_t)row * VOCAB_SIZE;
-  int best = 0;
-  float best_val = (float)p[0];
-  for(int i=1; i<VOCAB_SIZE; i++) {
-    float v = (float)p[i];
-    if(v > best_val) { best_val = v; best = i; }
-  }
-  return best;
+static std::mt19937 rng(std::random_device{}());
+
+static void sampleTokens(const bf16* logits, int* gpu_sampled_tokens, float* gpu_rand,
+                         int num_rows, std::vector<int>& tokens) {
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> rand_cpu(num_rows);
+  for(int i=0; i<num_rows; i++) rand_cpu[i] = dist(rng);
+
+  cudaMemcpy(gpu_rand, rand_cpu.data(), num_rows*sizeof(float), cudaMemcpyHostToDevice);
+  topKSample(logits, gpu_sampled_tokens, gpu_rand, num_rows, TOP_K, TEMPERATURE);
+
+  tokens.resize(num_rows);
+  cudaMemcpy(tokens.data(), gpu_sampled_tokens, num_rows*sizeof(int), cudaMemcpyDeviceToHost);
 }
 
 static bool isFinished(const SlotState& s) {
@@ -184,7 +189,7 @@ void prefill(
 
   // output
   bf16* logits,                                         // VOCAB_SIZE, last token only
-  std::vector<bf16>& logits_cpu,                        // host readback for sampling
+  int* gpu_sampled_tokens, float* gpu_rand,
   std::vector<SlotState>& slots
 ) {
   if(prompt_len > MAX_PROMPT_LEN) {
@@ -258,15 +263,14 @@ void prefill(
   bf16* last = rms_norms + (prompt_len-1)*E_DIM;
   linear(cublas_handle, last, weights.embed_tokens, logits, 1, E_DIM, VOCAB_SIZE);
 
-  cudaMemcpy(logits_cpu.data(), logits, VOCAB_SIZE*sizeof(bf16), cudaMemcpyDeviceToHost);
-
-  int best_token = argmaxRow(logits_cpu, 0);
+  std::vector<int> sampled;
+  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, 1, sampled);
 
   slots[slot].active = true;
   slots[slot].seq_len = prompt_len;
-  slots[slot].last_token = best_token;
+  slots[slot].last_token = sampled[0];
   slots[slot].generated.clear();
-  slots[slot].generated.push_back(best_token);
+  slots[slot].generated.push_back(sampled[0]);
 }
 
 void decode(
@@ -290,7 +294,7 @@ void decode(
   bf16* down,
 
   bf16* logits,                                         // num_active x VOCAB_SIZE
-  std::vector<bf16>& logits_cpu
+  int* gpu_sampled_tokens, float* gpu_rand
 ) {
   // pack the active slots into dense batch rows. active[b] is the slot that row b belongs to
   std::vector<int> active;
@@ -378,14 +382,14 @@ void decode(
   rmsNorm(hidden_state, rms_norms, weights.norm, B);
   linear(cublas_handle, rms_norms, weights.embed_tokens, logits, B, E_DIM, VOCAB_SIZE);
 
-  cudaMemcpy(logits_cpu.data(), logits, (size_t)B*VOCAB_SIZE*sizeof(bf16), cudaMemcpyDeviceToHost);
+  std::vector<int> sampled;
+  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, B, sampled);
 
   for(int b=0; b<B; b++) {
     int s = active[b];
-    int token = argmaxRow(logits_cpu, b);
     slots[s].seq_len += 1;
-    slots[s].last_token = token;
-    slots[s].generated.push_back(token);
+    slots[s].last_token = sampled[b];
+    slots[s].generated.push_back(sampled[b]);
   }
 }
 
@@ -435,7 +439,11 @@ int main(int argc, char* argv[]) {
   // output. decode needs one logit row per active slot, prefill only uses row 0
   bf16* logits;
   cudaMalloc(&logits, (size_t)MAX_SEQUENCES * VOCAB_SIZE * sizeof(bf16));
-  std::vector<bf16> logits_cpu((size_t)MAX_SEQUENCES * VOCAB_SIZE);
+
+  int* gpu_sampled_tokens;
+  float* gpu_rand;
+  cudaMalloc(&gpu_sampled_tokens, (size_t)MAX_SEQUENCES * sizeof(int));
+  cudaMalloc(&gpu_rand,           (size_t)MAX_SEQUENCES * sizeof(float));
 
   if(cudaGetLastError() != cudaSuccess) {
     std::cerr << "Buffer allocation failed\n";
@@ -467,7 +475,7 @@ int main(int argc, char* argv[]) {
               gpu_input_tokens, hidden_state, rms_norms,
               q_proj, k_proj, v_proj, attn_scores, attn_out, o_proj,
               gate, up, down,
-              logits, logits_cpu, slots);
+              logits, gpu_sampled_tokens, gpu_rand, slots);
 
       if(slots[s].active)
         std::cout << "slot " << s << " prefilled " << prompt_len << " tokens\n";
@@ -482,7 +490,7 @@ int main(int argc, char* argv[]) {
                gpu_input_tokens, gpu_positions, hidden_state, rms_norms,
                q_proj, k_proj, v_proj, attn_scores, attn_out, o_proj,
                gate, up, down,
-               logits, logits_cpu);
+               logits, gpu_sampled_tokens, gpu_rand);
 
     for(int s=0; s<MAX_SEQUENCES; s++) {
       if(!slots[s].active || !isFinished(slots[s])) continue;
@@ -503,7 +511,7 @@ int main(int argc, char* argv[]) {
   cudaFree(q_proj); cudaFree(k_proj); cudaFree(v_proj);
   cudaFree(attn_scores); cudaFree(attn_out); cudaFree(o_proj);
   cudaFree(gate); cudaFree(up); cudaFree(down);
-  cudaFree(logits);
+  cudaFree(logits); cudaFree(gpu_sampled_tokens); cudaFree(gpu_rand);
   free_rope_frequencies();
   cublasDestroy(cublas_handle);
 

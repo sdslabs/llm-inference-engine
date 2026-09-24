@@ -343,3 +343,96 @@ void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim)
     }
 }
 
+__device__ inline bool ranksHigher(float v, int i, float v_ref, int i_ref) {
+  if(i < 0) return false;
+  if(i_ref < 0) return true;
+  if(v != v_ref) return v > v_ref;
+  return i < i_ref;
+}
+
+__global__ void topKSampleKernel(const bf16* logits, int* sampled_tokens,
+                                 const float* uniform_rand, int k, float temperature) {
+  __shared__ float s_val[MAX_NUM_THREAD];
+  __shared__ int   s_idx[MAX_NUM_THREAD];
+  __shared__ float s_top_val[TOP_K];
+  __shared__ int   s_top_idx[TOP_K];
+
+  const bf16* row = logits + (size_t)blockIdx.x * VOCAB_SIZE;
+  int tid = threadIdx.x;
+
+  float best = -INF;
+  int best_idx = -1;
+  for(int i=tid; i<VOCAB_SIZE; i+=blockDim.x) {
+    float v = (float)row[i];
+    if(ranksHigher(v, i, best, best_idx)) { best = v; best_idx = i; }
+  }
+
+  for(int n=0; n<k; n++) {
+    s_val[tid] = best;
+    s_idx[tid] = best_idx;
+    __syncthreads();
+
+    for(int stride=blockDim.x/2; stride>0; stride>>=1) {
+      if(tid < stride && ranksHigher(s_val[tid+stride], s_idx[tid+stride], s_val[tid], s_idx[tid])) {
+        s_val[tid] = s_val[tid+stride];
+        s_idx[tid] = s_idx[tid+stride];
+      }
+      __syncthreads();
+    }
+
+    float win_val = s_val[0];
+    int win_idx = s_idx[0];
+    if(tid == 0) {
+      s_top_val[n] = win_val;
+      s_top_idx[n] = win_idx;
+    }
+
+    if(best_idx == win_idx) {
+      float next = -INF;
+      int next_idx = -1;
+      for(int i=tid; i<VOCAB_SIZE; i+=blockDim.x) {
+        float v = (float)row[i];
+        if(!ranksHigher(win_val, win_idx, v, i)) continue;
+        if(ranksHigher(v, i, next, next_idx)) { next = v; next_idx = i; }
+      }
+      best = next;
+      best_idx = next_idx;
+    }
+    __syncthreads();
+  }
+
+  if(tid == 0) {
+    float max_val = s_top_val[0];
+    float sum = 0.0f;
+    for(int n=0; n<k; n++) {
+      s_top_val[n] = expf((s_top_val[n] - max_val) / temperature);
+      sum += s_top_val[n];
+    }
+
+    float r = uniform_rand[blockIdx.x] * sum;
+    float acc = 0.0f;
+    int chosen = s_top_idx[k-1];
+    for(int n=0; n<k; n++) {
+      acc += s_top_val[n];
+      if(r < acc) { chosen = s_top_idx[n]; break; }
+    }
+    sampled_tokens[blockIdx.x] = chosen;
+  }
+}
+
+void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_rand,
+                int num_rows, int k, float temperature) {
+  if(k > TOP_K) k = TOP_K;
+  if(k > VOCAB_SIZE) k = VOCAB_SIZE;
+  if(k < 1 || temperature <= 0.0f) {
+    k = 1;
+    temperature = 1.0f;
+  }
+
+  topKSampleKernel<<<num_rows, MAX_NUM_THREAD>>>(logits, sampled_tokens, uniform_rand, k, temperature);
+  cudaError error = cudaGetLastError();
+  if(error != cudaError::cudaSuccess) {
+    std::cerr << "CUDA last error in topKSample: " << cudaGetErrorString(error) << std::endl;
+  }
+}
+

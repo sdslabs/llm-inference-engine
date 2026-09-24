@@ -30,6 +30,8 @@ constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;  // same mapping, applied on the s
 constexpr int MAX_NEW_TOKENS_GENERATED = 20; // TODO: parameterize it with program arguments
 constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>, stops decode
 constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>, stops decode
+constexpr int TOP_K = 40;
+constexpr float TEMPERATURE = 0.8f;
 
 // runtime limits
 constexpr int MAX_SEQUENCES = 4;     // KV cache slots, one per in flight request
@@ -57,3 +59,6 @@ void causalMask(bf16* input, int num_tokens);
 // decode
 void decodeSoftmax(bf16* attention_scores, int seq_len);
 void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim);
+
+void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_rand,
+                int num_rows, int k, float temperature);

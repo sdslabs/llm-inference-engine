@@ -1,5 +1,6 @@
 /src/main
 *.o
-engine
-./python/venv/*
-./python/models/*
+/engine
+/python/venv/
+/python/models/
+/build
