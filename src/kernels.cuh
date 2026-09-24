@@ -54,8 +54,6 @@ void free_rope_frequencies(void);
 void rope(bf16* input, int num_tokens, int proj_dim);
 void causalMask(bf16* input, int num_tokens);
 
-//decode
-
-
 // decode
 void decodeSoftmax(bf16* attention_scores, int seq_len);
+void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim);

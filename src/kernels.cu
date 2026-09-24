@@ -7,7 +7,7 @@ __global__ void embeddingGatherKernel(int* gpu_input_tokens, bf16* gpu_input_emb
   int workIdx = blockIdx.x*E_DIM + threadIdx.x;
   if(workIdx < num_input_tokens*E_DIM) {
     gpu_input_embeds[workIdx] = embed_tokens[gpu_input_tokens[blockIdx.x]*E_DIM + threadIdx.x];
-    gpu_input_embeds[workIdx + E_DIM/2] = embed_tokens[gpu_input_tokens[blockIdx.x]*E_DIM + threadIdx.x + 1024];
+    gpu_input_embeds[workIdx + E_DIM/2] = embed_tokens[gpu_input_tokens[blockIdx.x]*E_DIM + threadIdx.x + E_DIM/2];
   }
 }
 
@@ -28,7 +28,7 @@ __global__ void rmsNormKernel(bf16* input, bf16* output, bf16* norm_weights, int
     rms_vector[threadIdx.x] = (float)input[workIdx]*(float)input[workIdx] + (float)input[workIdx+E_DIM/2]*(float)input[workIdx+E_DIM/2];
     __syncthreads(); // threads block untill all have reached this point
 
-    for(int i=1; i < 1024; i*=2) {
+    for(int i=1; i < E_DIM/2; i*=2) {
       if(threadIdx.x % (i*2) == 0) {
         rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x+i];
       }
@@ -54,8 +54,8 @@ void rmsNorm(bf16* input, bf16* output, bf16* norm_weights, int num_tokens) {
 
 __global__ void softmaxKernel(bf16* input, int num_tokens) {
   // parallel reduction
-  __shared__ float m[1024];
-  __shared__ float d[1024];
+  __shared__ float m[MAX_NUM_THREAD];
+  __shared__ float d[MAX_NUM_THREAD];
 
   int workIdx = blockIdx.x*num_tokens + threadIdx.x;
   float token = (float)input[workIdx];
@@ -112,7 +112,6 @@ void residualAdd(bf16* input, bf16* residual, int num_tokens) {
   if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 }
 
-// hard-coded values for Llama 3.2 1B
 __global__ void siluKernel(bf16* a, bf16* b) {
   int workIdx = blockIdx.x*INTERMEDIATE_DIM + threadIdx.x;
   for(int i=0; i<INTERMEDIATE_DIM; i += MAX_NUM_THREAD) {
@@ -121,7 +120,7 @@ __global__ void siluKernel(bf16* a, bf16* b) {
 }
 
 void silu(bf16* a, bf16* b, int num_tokens) {
-  siluKernel<<<num_tokens, 1024>>>(a, b);
+  siluKernel<<<num_tokens, MAX_NUM_THREAD>>>(a, b);
   cudaError error = cudaGetLastError();
   if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 
@@ -138,7 +137,7 @@ __global__ void causalMaskKernel(bf16* input, int num_tokens) {
 
 void causalMask(bf16* input, int num_tokens) {
   if(num_tokens > MAX_NUM_THREAD) {
-    std::cout << "Can't launch more than 1024 threads on this GPU, Causal mask kernel not launched";
+    std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, Causal mask kernel not launched";
     return;
   }
 
@@ -245,8 +244,8 @@ __global__ void ropeKernel(bf16* input, int num_tokens, int proj_dim,
 
 void rope(bf16* input, int num_tokens, int proj_dim) {
   int num_threads = proj_dim / 2;
-  if(num_threads > 1024) {
-    std::cout << "Can't launch more than 1024 threads on this GPU, RoPE kernel not launched";
+  if(num_threads > MAX_NUM_THREAD) {
+    std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
     return;
   }
 
@@ -256,20 +255,9 @@ void rope(bf16* input, int num_tokens, int proj_dim) {
 
 }
 
-
-
-
-// Decode Kernels below
-
-// Using cuBLAS for GEMM and GEMV operations.
-
-// TODO: KVCache update kernel for decoding.
-
-// TODO: decode Attention block kernel
-
 __global__ void decodeSoftmaxKernel(bf16* attention_scores, int seq_len) {
-  __shared__ float m[1024];
-  __shared__ float d[1024];
+  __shared__ float m[MAX_NUM_THREAD];
+  __shared__ float d[MAX_NUM_THREAD];
 
   int workIdx = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
   float token = -INF;
@@ -281,7 +269,7 @@ __global__ void decodeSoftmaxKernel(bf16* attention_scores, int seq_len) {
 
   // binary tree types
   for(int i=1; i<seq_len; i*=2) {
-    if(threadIdx.x % (i*2) == 0 && threadIdx.x + i <= seq_len) {
+    if(threadIdx.x % (i*2) == 0 && threadIdx.x + i < seq_len) {
       float m_a = m[threadIdx.x];
       float d_a = d[threadIdx.x];
       float m_b = m[threadIdx.x+i];
@@ -306,11 +294,52 @@ void decodeSoftmax(bf16* attention_scores, int seq_len) {
     std::cerr << "decodeSoftmax: seq_len " << seq_len << " exceeds " << MAX_NUM_THREAD << "\n";
     return;
   }
-  decodeSoftmaxKernel<<<NUM_Q_HEADS, MAX_NUM_THREAD>>>(attention_scores, seq_len);
+  decodeSoftmaxKernel<<<NUM_Q_HEADS, seq_len>>>(attention_scores, seq_len);
   cudaError error = cudaGetLastError();
   if(error != cudaError::cudaSuccess) {
     std::cerr << "CUDA last error in decodeSoftmax: " << cudaGetErrorString(error) << std::endl;
   }
 }
 
-// TODO: decode Attention values kernel
+__global__ void ropeKernelDecode(bf16* input, const int* positions, int proj_dim,
+                                 const float* cos_table, const float* sin_table)
+{
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    int half_dim = HEAD_DIM / 2;
+
+    if (tid >= proj_dim / 2) return;
+
+    int head_idx = tid / half_dim;
+    int pair_idx = tid % half_dim;
+
+    int base = row * proj_dim + head_idx * HEAD_DIM;
+    int idx1 = base + pair_idx;
+    int idx2 = base + pair_idx + half_dim;
+
+    float x1 = (float)input[idx1];
+    float x2 = (float)input[idx2];
+
+    int table_idx = positions[row] * HEAD_DIM + pair_idx * 2;
+    float c = cos_table[table_idx];
+    float s = sin_table[table_idx];
+
+    input[idx1] = (bf16)(x1 * c - x2 * s);
+    input[idx2] = (bf16)(x1 * s + x2 * c);
+}
+
+void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > MAX_NUM_THREAD) {
+        std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
+        return;
+    }
+
+    ropeKernelDecode<<<num_rows, num_threads>>>(input, positions, proj_dim, d_cos_table, d_sin_table);
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess) {
+        std::cout << "CUDA last error: " << cudaGetErrorString(error) << std::endl;
+    }
+}
+

@@ -276,6 +276,7 @@ void decode(
   bf16* kv_cache,
 
   int* gpu_input_tokens,
+  int* gpu_positions,                                   // MAX_SEQUENCES, cache position of each row
   bf16* hidden_state,                                   // num_active x E_DIM
   bf16* rms_norms,
 
@@ -304,7 +305,11 @@ void decode(
   int B = active.size();
   if(B == 0) return;
 
+  const float scale = 1.0f / SQRT_HEAD_DIM;
+  const float zero = 0.0f, one = 1.0f;
+
   cudaMemcpy(gpu_input_tokens, batch_tokens.data(), B*sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(gpu_positions, batch_positions.data(), B*sizeof(int), cudaMemcpyHostToDevice);
   embeddingGather(gpu_input_tokens, hidden_state, weights.embed_tokens, B);
 
   for(int layer=0; layer<N_LAYERS; layer++) {
@@ -314,7 +319,46 @@ void decode(
     linear(cublas_handle, rms_norms, weights.w_k[layer], k_proj, B, E_DIM, KV_DIM);
     linear(cublas_handle, rms_norms, weights.w_v[layer], v_proj, B, E_DIM, KV_DIM);
 
-    // TODO: Work left 
+    ropeDecode(q_proj, gpu_positions, B, E_DIM);
+    ropeDecode(k_proj, gpu_positions, B, KV_DIM);
+
+    for(int b=0; b<B; b++) {
+      bf16* sc = slotCache(kv_cache, active[b]);
+      size_t off = (size_t)batch_positions[b]*KV_DIM;
+      cudaMemcpy(layerK(sc, layer) + off, k_proj + (size_t)b*KV_DIM,
+      KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
+      cudaMemcpy(layerV(sc, layer) + off, v_proj + (size_t)b*KV_DIM,
+      KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
+    }
+    
+    for(int b=0; b<B; b++) {
+      int len = batch_positions[b] + 1;
+      bf16* Sc = slotCache(kv_cache, active[b]);
+      bf16* Sb = attn_scores + (size_t)b*NUM_Q_HEADS*MAX_SEQ_LEN;
+
+      for(int h=0; h<NUM_Q_HEADS; h++) {
+        const bf16* Qh = q_proj + (size_t)b*E_DIM + h*HEAD_DIM;
+        const bf16* Kh = layerK(Sc, layer) + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
+        bf16* Sh = Sb + (size_t)h*MAX_SEQ_LEN;
+        cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, len, 1, HEAD_DIM,
+                     &scale, Kh, CUDA_R_16BF, KV_DIM, Qh, CUDA_R_16BF, E_DIM,
+                     &zero,  Sh, CUDA_R_16BF, len,
+                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+      }
+
+      decodeSoftmax(Sb, len);
+
+      for(int h=0; h<NUM_Q_HEADS; h++) {
+        const bf16* Vh = layerV(Sc, layer) + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
+        const bf16* Sh = Sb + (size_t)h*MAX_SEQ_LEN;
+        bf16* Oh = attn_out + (size_t)b*E_DIM + h*HEAD_DIM;
+        cublasGemmEx(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, HEAD_DIM, 1, len,
+                     &one,  Vh, CUDA_R_16BF, KV_DIM, Sh, CUDA_R_16BF, len, &zero,
+                     Oh, CUDA_R_16BF, E_DIM,
+                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+      }
+
+    }
 
     linear(cublas_handle, attn_out, weights.w_o[layer], o_proj, B, E_DIM, E_DIM);
     residualAdd(o_proj, hidden_state, B);
@@ -366,8 +410,10 @@ int main(int argc, char* argv[]) {
 
   // residual stream scratch
   int* gpu_input_tokens;
+  int* gpu_positions;
   bf16 *hidden_state, *rms_norms;
   cudaMalloc(&gpu_input_tokens, (size_t)MAX_PROMPT_LEN * sizeof(int));
+  cudaMalloc(&gpu_positions,    (size_t)MAX_SEQUENCES * sizeof(int));
   cudaMalloc(&hidden_state,     (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
   cudaMalloc(&rms_norms,        (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
 
@@ -431,9 +477,9 @@ int main(int argc, char* argv[]) {
     for(const SlotState& s : slots) if(s.active) num_active++;
     if(num_active == 0) break;
 
-    decodeStep(slots,
+    decode(slots,
                weights, cublas_handle, kv_cache,
-               gpu_input_tokens, hidden_state, rms_norms,
+               gpu_input_tokens, gpu_positions, hidden_state, rms_norms,
                q_proj, k_proj, v_proj, attn_scores, attn_out, o_proj,
                gate, up, down,
                logits, logits_cpu);
@@ -452,7 +498,8 @@ int main(int argc, char* argv[]) {
   cudaDeviceSynchronize();
 
   cudaFree(kv_cache);
-  cudaFree(gpu_input_tokens); cudaFree(hidden_state); cudaFree(rms_norms);
+  cudaFree(gpu_input_tokens); cudaFree(gpu_positions);
+  cudaFree(hidden_state); cudaFree(rms_norms);
   cudaFree(q_proj); cudaFree(k_proj); cudaFree(v_proj);
   cudaFree(attn_scores); cudaFree(attn_out); cudaFree(o_proj);
   cudaFree(gate); cudaFree(up); cudaFree(down);
