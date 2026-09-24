@@ -32,6 +32,7 @@ constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>, stops decode
 constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>, stops decode
 
 // runtime limits
+constexpr int MAX_SEQUENCES = 4;     // KV cache slots, one per in flight request
 constexpr int MAX_PROMPT_LEN = 512;  // TODO: arbitrary, tunable
 constexpr int MAX_SEQ_LEN = 2048;    // prompt + generated, sizes the KV cache and rope tables
 constexpr int MAX_NUM_THREAD = 1024; // max threads per block on this GPU
