@@ -1,1 +1,5 @@
 /src/main
+*.o
+engine
+./python/venv/*
+./python/models/*
