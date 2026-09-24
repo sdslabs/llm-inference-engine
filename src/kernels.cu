@@ -2,6 +2,18 @@
 #include <iostream>
 #include <vector>
 
+// helper function
+// Y[T, OUT] = X[T, IN] @ W [OUT, IN]^T
+static void linear(cublasHandle_t h, const bf16* X, const bf16* W, bf16* Y,
+                   int T, int IN, int OUT) {
+  const float alpha = 1.0f, beta = 0.0f;
+  cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N,
+               OUT, T, IN,
+               &alpha, W, CUDA_R_16BF, IN,
+                       X, CUDA_R_16BF, IN,
+               &beta,  Y, CUDA_R_16BF, OUT,
+               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+}
 
 __global__ void embeddingGatherKernel(int* gpu_input_tokens, bf16* gpu_input_embeds, bf16* embed_tokens, int num_input_tokens) {
   int workIdx = blockIdx.x*E_DIM + threadIdx.x;
@@ -100,14 +112,14 @@ void softmax(bf16* input, int num_tokens) {
   }
 }
 
-__global__ void residualKernel(bf16* input, bf16* skip_conn) {
+__global__ void residualKernel(bf16* input, bf16* residual) {
   int workIdx = threadIdx.x + blockIdx.x*E_DIM;
-  input[workIdx] += skip_conn[workIdx];
-  input[workIdx+E_DIM/2] += skip_conn[workIdx+E_DIM/2];
+  input[workIdx] += residual[workIdx];
+  input[workIdx+E_DIM/2] += residual[workIdx+E_DIM/2];
 }
 
-void residualAdd(bf16* input, bf16* skip_conn, int num_tokens) {
-  residualKernel<<<num_tokens, E_DIM/2>>>(input, skip_conn);
+void residualAdd(bf16* input, bf16* residual, int num_tokens) {
+  residualKernel<<<num_tokens, E_DIM/2>>>(input, residual);
   cudaError error = cudaGetLastError();
   if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 }

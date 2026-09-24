@@ -53,4 +53,6 @@ void free_rope_frequencies(void);
 void rope(bf16* input, int num_tokens, int proj_dim);
 void causalMask(bf16* input, int num_tokens);
 
+//decode
+
 

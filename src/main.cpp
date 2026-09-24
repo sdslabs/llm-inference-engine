@@ -143,6 +143,52 @@ void prefill(
   embeddingGather(gpu_input_tokens, residual, weights.embed_tokens, prompt_len);
 
   cudaMemcpy(hidden_state, residual, prompt_len*E_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
+
+  for(int layer=0; layer<N_LAYERS; layer++) {
+    rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
+
+    linear(cublas_handle, rms_norms, weights.w_q[layer], q_proj, prompt_len, E_DIM, E_DIM ); 
+    linear(cublas_handle, rms_norms, weights.w_k[layer], k_proj, prompt_len, E_DIM, KV_DIM); 
+    linear(cublas_handle, rms_norms, weights.w_v[layer], v_proj, prompt_len, E_DIM, KV_DIM); 
+
+    rope(q_proj, prompt_len, E_DIM );
+    rope(k_proj, prompt_len, KV_DIM);
+
+    const float scale = 1.0f / SQRT_HEAD_DIM;
+    const float zero = 0.0f, one = 1.0f;
+
+    for(int h=0; h<NUM_Q_HEADS; h++) {
+      const bf16* Qh = q_proj + h*HEAD_DIM;
+      const bf16* Kh = k_proj + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
+      bf16* Sh = attn_scores + h*prompt_len*prompt_len;
+      cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, prompt_len, prompt_len,
+                   HEAD_DIM, &scale, Kh, CUDA_R_16BF, KV_DIM, Qh, CUDA_R_16BF, E_DIM,
+                   &zero, Sh, CUDA_R_16BF, prompt_len, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    }
+
+    causalMask(attn_scores, prompt_len);
+    softmax(attn_scores, prompt_len);
+
+    for (int h = 0; h < NUM_Q_HEADS; ++h) {
+      const bf16* Vh = v_proj + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
+      const bf16* Sh = attn_scores + h*prompt_len*prompt_len;
+      bf16* Oh = attn_out + h*HEAD_DIM;
+
+      cublasGemmEx(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+               HEAD_DIM, prompt_len, prompt_len,
+               &one,  Vh, CUDA_R_16BF, KV_DIM,
+                      Sh, CUDA_R_16BF, prompt_len,
+               &zero, Oh, CUDA_R_16BF, E_DIM,
+               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    }
+
+    linear(cublas_handle, attn_out, weights.w_o[layer], o_proj, prompt_len, E_DIM, E_DIM);
+    residualAdd(o_proj, residual, prompt_len);
+    rmsNorm(o_proj, rms_norms, weights.post_attn_layernorms[layer], prompt_len);
+
+    // now rms_norms has latest state. 
+
+  }
   
 }
 
