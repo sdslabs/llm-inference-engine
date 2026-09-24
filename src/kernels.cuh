@@ -57,3 +57,5 @@ void causalMask(bf16* input, int num_tokens);
 //decode
 
 
+// decode
+void decodeSoftmax(bf16* attention_scores, int seq_len);

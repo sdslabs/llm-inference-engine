@@ -1,4 +1,5 @@
 #include "kernels.cuh"
+#include <algorithm>
 #include <iostream>
 #include <vector>
 
@@ -259,3 +260,57 @@ void rope(bf16* input, int num_tokens, int proj_dim) {
 
 
 // Decode Kernels below
+
+// Using cuBLAS for GEMM and GEMV operations.
+
+// TODO: KVCache update kernel for decoding.
+
+// TODO: decode Attention block kernel
+
+__global__ void decodeSoftmaxKernel(bf16* attention_scores, int seq_len) {
+  __shared__ float m[1024];
+  __shared__ float d[1024];
+
+  int workIdx = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
+  float token = -INF;
+  if(threadIdx.x < seq_len) token = (float)attention_scores[workIdx];
+
+  m[threadIdx.x] = token;
+  d[threadIdx.x] = 1.0f;
+  __syncthreads();
+
+  // binary tree types
+  for(int i=1; i<seq_len; i*=2) {
+    if(threadIdx.x % (i*2) == 0 && threadIdx.x + i <= seq_len) {
+      float m_a = m[threadIdx.x];
+      float d_a = d[threadIdx.x];
+      float m_b = m[threadIdx.x+i];
+      float d_b = d[threadIdx.x+i];
+
+      float m_new = fmaxf(m_a, m_b);
+      float d_new = d_a*expf(m_a-m_new) + d_b*expf(m_b - m_new);
+
+      m[threadIdx.x] = m_new;
+      d[threadIdx.x] = d_new;
+    }
+    __syncthreads();
+  }
+
+  if(threadIdx.x < seq_len) {
+    attention_scores[workIdx] = (bf16)(expf(token - m[0]) / d[0]);
+  }
+}
+
+void decodeSoftmax(bf16* attention_scores, int seq_len) {
+  if (seq_len > MAX_NUM_THREAD) {
+    std::cerr << "decodeSoftmax: seq_len " << seq_len << " exceeds " << MAX_NUM_THREAD << "\n";
+    return;
+  }
+  decodeSoftmaxKernel<<<NUM_Q_HEADS, MAX_NUM_THREAD>>>(attention_scores, seq_len);
+  cudaError error = cudaGetLastError();
+  if(error != cudaError::cudaSuccess) {
+    std::cerr << "CUDA last error in decodeSoftmax: " << cudaGetErrorString(error) << std::endl;
+  }
+}
+
+// TODO: decode Attention values kernel
