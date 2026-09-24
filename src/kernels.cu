@@ -261,27 +261,8 @@ void rope(bf16* input, int num_tokens, int proj_dim) {
 
 
 // Decode Kernels below
-__global__ void linearProjectionGEMVKernel(bf16* input, bf16* weight, bf16* output, int input_features, int output_features) {
-  int row = blockIdx.x * blockDim.x + threadIdx.x;
 
-  if(row < output_features) {
-    float sum = 0.0f;
-    for(int col = 0; col < input_features; col++) {
-      sum += (float)input[col] * (float)weight[row * input_features + col];
-    }
-    output[row] = (bf16)sum;
-  }
-}
-
-void linearProjectionGEMV(bf16* input, bf16* weight, bf16* output, int input_features, int output_features) {
-  int threads = std::min(output_features, MAX_NUM_THREAD);
-  int blocks = (output_features + threads - 1) / threads;
-  linearProjectionGEMVKernel<<<blocks, threads>>>(input, weight, output, input_features, output_features);
-  cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) {
-    std::cerr << "CUDA last error in linearProjectionGEMV: " << cudaGetErrorString(error) << std::endl;
-  }
-}
+// Using cuBLAS for GEMM and GEMV operations.
 
 // TODO: KVCache update kernel for decoding.
 

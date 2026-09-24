@@ -55,5 +55,4 @@ void causalMask(bf16* input, int num_tokens);
 
 
 // decode
-void linearProjectionGEMV(bf16* input, bf16* weight, bf16* output, int input_features, int output_features);
 void decodeSoftmax(bf16* attention_scores, int seq_len);
