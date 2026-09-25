@@ -1,15 +1,32 @@
+#include <tokenizers_cpp.h>
 #include <nlohmann/json.hpp>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <iostream>
-#include <queue>
 #include <filesystem>
+#include <queue>
 #include <fstream>
 #include <random>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include "kernels.cuh"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+// Load Hugging Face tokenizer.json
+std::unique_ptr<tokenizers::Tokenizer> loadNativeTokenizer(const std::string& tokenizer_json_path) {
+  std::ifstream file(tokenizer_json_path);
+  if(!file.is_open()) {
+    throw std::runtime_error("Failed to open tokenizer file: " + tokenizer_json_path);
+  }
+
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+
+  return tokenizers::Tokenizer::FromBlobJSON(buffer.str());
+}
 
 int checkGPUStatus() {
   int device_count = 0;
@@ -394,10 +411,25 @@ void decode(
 }
 
 int main(int argc, char* argv[]) {
-  if(argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <model.safetensors> [token ids...]\n";
+  if(argc < 4) {
+    std::cerr << "Usage: " << argv[0] << " <model.safetensors> <tokenizer.json> \"<prompt>\"\n";
     return 1;
   }
+
+  std::string model_path = argv[1];
+  std::string tokenizer_path = argv[2];
+  std::string prompt_text = argv[3];
+
+  // Initialize the tokenizer
+  auto tokenizer = loadNativeTokenizer(tokenizer_path);
+  std::vector<int> prompt_ids = tokenizer->Encode(prompt_text);
+  
+  if(prompt_ids.empty() || prompt_ids[0] != 128000) {
+    prompt_ids.insert(prompt_ids.begin(), 128000);
+  }
+
+  std::queue<std::vector<int>> pending;
+  pending.push(prompt_ids);
 
   Weights weights;
   if(loadWeights(weights, argv[1])) return 1;
@@ -450,16 +482,6 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // TODO: For now every argv prompt is one request
-  std::queue<std::vector<int>> pending;
-  if(argc > 2) {
-    std::vector<int> prompt;
-    for(int i=2; i<argc; i++) prompt.push_back(std::stoi(argv[i]));
-    pending.push(prompt);
-  } else {
-    pending.push({128000});  // <|begin_of_text|>
-  }
-
   std::vector<SlotState> slots(MAX_SEQUENCES);
 
   while(true) {
@@ -498,6 +520,10 @@ int main(int argc, char* argv[]) {
       std::cout << "slot " << s << " done, " << slots[s].generated.size() << " tokens:";
       for(int t : slots[s].generated) std::cout << " " << t;
       std::cout << std::endl;
+
+      std::string generated_text = tokenizer->Decode(slots[0].generated);
+      std::cout << "Ouput -> \n";
+      std::cout << prompt_text << generated_text << "\n";
 
       slots[s] = SlotState{};
     }
