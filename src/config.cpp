@@ -8,7 +8,7 @@ namespace fs = std::filesystem;
 
 static void usage(const char* prog) {
   std::cerr
-    << "Usage: " << prog << " <model.safetensors> [token ids...] [options]\n\n"
+    << "Usage: " << prog << " <model.safetensors> <tokenizer.json> \"<prompt>\" [options]\n\n"
     << "  --prompts <file.jsonl>   one request per line: [ids] or {\"id\":..,\"tokens\":[ids]}\n"
     << "  --max-new-tokens <n>     default " << MAX_NEW_TOKENS_GENERATED << "\n"
     << "  --top-k <n>              default " << TOP_K << "\n"
@@ -122,30 +122,16 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
     if(missing_value) return ParseResult::Error;
   }
 
-  if(positional.empty()) {
+  size_t required = prompts_file.empty() ? 3 : 2;
+  if(positional.size() < required) {
     usage(argv[0]);
     return ParseResult::Error;
   }
   cfg.model_path = positional[0];
+  cfg.tokenizer_path = positional[1];
+  if(positional.size() > 2) cfg.prompt_text = positional[2];
 
-  if(!prompts_file.empty()) {
-    if(positional.size() > 1) {
-      std::cerr << "--prompts cannot be combined with inline token ids\n";
-      return ParseResult::Error;
-    }
-    if(loadPrompts(prompts_file, cfg)) return ParseResult::Error;
-  } else {
-    std::vector<int> prompt;
-    try {
-      for(size_t i=1; i<positional.size(); i++) prompt.push_back(std::stoi(positional[i]));
-    } catch(const std::exception& e) {
-      std::cerr << "Token ids must be integers: " << e.what() << "\n";
-      return ParseResult::Error;
-    }
-    if(prompt.empty()) prompt.push_back(128000);
-    cfg.prompts.push_back(std::move(prompt));
-    cfg.prompt_ids.push_back("0");
-  }
+  if(!prompts_file.empty() && loadPrompts(prompts_file, cfg)) return ParseResult::Error;
 
   if(cfg.greedy) cfg.top_k = 1;
 

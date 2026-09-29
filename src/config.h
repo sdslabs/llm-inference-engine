@@ -6,6 +6,9 @@
 
 struct Config {
   std::filesystem::path model_path;
+  std::filesystem::path tokenizer_path;
+  std::string prompt_text;
+
   std::vector<std::vector<int>> prompts;
   std::vector<std::string> prompt_ids;
 
