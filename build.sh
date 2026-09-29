@@ -6,8 +6,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 ARCH="${ARCH:-sm_89}"
 BUILD_DIR="${BUILD_DIR:-build}"
 TARGET="${TARGET:-engine}"
-SOURCES=(src/kernels.cu src/main.cpp)
-HEADERS=(src/kernels.cuh)
+SOURCES=(src/kernels.cu src/config.cpp src/main.cpp)
+HEADERS=(src/kernels.cuh src/config.h)
 
 if [[ "${1:-}" == "clean" ]]; then
   rm -rf "$BUILD_DIR" "$TARGET"

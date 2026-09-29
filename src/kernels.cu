@@ -436,3 +436,51 @@ void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_ra
   }
 }
 
+__global__ void logProbsKernel(const bf16* logits, const int* targets, float* out_logprobs) {
+  __shared__ float s[MAX_NUM_THREAD];
+
+  const bf16* row = logits + (size_t)blockIdx.x * VOCAB_SIZE;
+  int tid = threadIdx.x;
+
+  float local_max = -INF;
+  for(int i=tid; i<VOCAB_SIZE; i+=blockDim.x) {
+    local_max = fmaxf(local_max, (float)row[i]);
+  }
+  s[tid] = local_max;
+  __syncthreads();
+
+  for(int stride=blockDim.x/2; stride>0; stride>>=1) {
+    if(tid < stride) s[tid] = fmaxf(s[tid], s[tid+stride]);
+    __syncthreads();
+  }
+  float max_val = s[0];
+  __syncthreads();
+
+  float local_sum = 0.0f;
+  for(int i=tid; i<VOCAB_SIZE; i+=blockDim.x) {
+    local_sum += expf((float)row[i] - max_val);
+  }
+  s[tid] = local_sum;
+  __syncthreads();
+
+  for(int stride=blockDim.x/2; stride>0; stride>>=1) {
+    if(tid < stride) s[tid] += s[tid+stride];
+    __syncthreads();
+  }
+
+  if(tid == 0) {
+    int target = targets[blockIdx.x];
+    out_logprobs[blockIdx.x] = (float)row[target] - max_val - logf(s[0]);
+  }
+}
+
+void logProbs(const bf16* logits, const int* targets, float* out_logprobs, int num_rows) {
+  if(num_rows < 1) return;
+
+  logProbsKernel<<<num_rows, MAX_NUM_THREAD>>>(logits, targets, out_logprobs);
+  cudaError error = cudaGetLastError();
+  if(error != cudaError::cudaSuccess) {
+    std::cerr << "CUDA last error in logProbs: " << cudaGetErrorString(error) << std::endl;
+  }
+}
+
