@@ -11,6 +11,25 @@ if [ -z "$CUDA_PATH" ]; then
         NVCC_PATH=$(command -v nvcc || echo "/usr/bin/nvcc")
         CUDA_PATH="$(dirname "$(dirname "$NVCC_PATH")")"
     fi
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+ARCH="${ARCH:-sm_89}"
+BUILD_DIR="${BUILD_DIR:-build}"
+TARGET="${TARGET:-engine}"
+SOURCES=(src/kernels.cu src/config.cpp src/main.cpp)
+HEADERS=(src/kernels.cuh src/config.h)
+
+if [[ "${1:-}" == "clean" ]]; then
+  rm -rf "$BUILD_DIR" "$TARGET"
+  echo "cleaned"
+  exit 0
+fi
+
+if ! command -v nvcc >/dev/null; then
+  echo "nvcc not found in PATH" >&2
+  exit 1
 fi
 
 echo "Using CUDA path: $CUDA_PATH"

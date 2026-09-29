@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include "kernels.cuh"
+#include "config.h"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -144,27 +145,27 @@ static bf16* layerV(bf16* slot_cache, int layer) {
   return layerK(slot_cache, layer) + (size_t)MAX_SEQ_LEN * KV_DIM;
 }
 
-static std::mt19937 rng(std::random_device{}());
+static std::mt19937_64 rng;
 
 static void sampleTokens(const bf16* logits, int* gpu_sampled_tokens, float* gpu_rand,
-                         int num_rows, std::vector<int>& tokens) {
+                         int num_rows, int top_k, float temperature, std::vector<int>& tokens) {
   std::uniform_real_distribution<float> dist(0.0f, 1.0f);
   std::vector<float> rand_cpu(num_rows);
   for(int i=0; i<num_rows; i++) rand_cpu[i] = dist(rng);
 
   cudaMemcpy(gpu_rand, rand_cpu.data(), num_rows*sizeof(float), cudaMemcpyHostToDevice);
-  topKSample(logits, gpu_sampled_tokens, gpu_rand, num_rows, TOP_K, TEMPERATURE);
+  topKSample(logits, gpu_sampled_tokens, gpu_rand, num_rows, top_k, temperature);
 
   tokens.resize(num_rows);
   cudaMemcpy(tokens.data(), gpu_sampled_tokens, num_rows*sizeof(int), cudaMemcpyDeviceToHost);
 }
 
-static bool isFinished(const SlotState& s) {
+static bool isFinished(const SlotState& s, int max_new_tokens) {
   if(s.generated.empty()) return false;
   int t = s.generated.back();
   return t == END_OF_TEXT_TOKEN_ID
       || t == EOT_ID_TOKEN_ID
-      || (int)s.generated.size() >= MAX_NEW_TOKENS_GENERATED
+      || (int)s.generated.size() >= max_new_tokens
       || s.seq_len >= MAX_SEQ_LEN;
 }
 
@@ -182,7 +183,7 @@ static void linear(cublasHandle_t h, const bf16* X, const bf16* W, bf16* Y,
 
 void prefill(
   // request
-  std::vector<int>& prompt, int& prompt_len, int slot,
+  std::vector<int>& prompt, int& prompt_len, int slot, const Config& cfg,
 
   // persistent, allocated once at startup
   Weights& weights, cublasHandle_t cublas_handle,
@@ -281,7 +282,7 @@ void prefill(
   linear(cublas_handle, last, weights.embed_tokens, logits, 1, E_DIM, VOCAB_SIZE);
 
   std::vector<int> sampled;
-  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, 1, sampled);
+  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, 1, cfg.top_k, cfg.temperature, sampled);
 
   slots[slot].active = true;
   slots[slot].seq_len = prompt_len;
@@ -291,7 +292,7 @@ void prefill(
 }
 
 void decode(
-  std::vector<SlotState>& slots,
+  std::vector<SlotState>& slots, const Config& cfg,
 
   Weights& weights, cublasHandle_t cublas_handle,
   bf16* kv_cache,
@@ -400,7 +401,7 @@ void decode(
   linear(cublas_handle, rms_norms, weights.embed_tokens, logits, B, E_DIM, VOCAB_SIZE);
 
   std::vector<int> sampled;
-  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, B, sampled);
+  sampleTokens(logits, gpu_sampled_tokens, gpu_rand, B, cfg.top_k, cfg.temperature, sampled);
 
   for(int b=0; b<B; b++) {
     int s = active[b];
@@ -411,10 +412,16 @@ void decode(
 }
 
 int main(int argc, char* argv[]) {
-  if(argc < 4) {
-    std::cerr << "Usage: " << argv[0] << " <model.safetensors> <tokenizer.json> \"<prompt>\"\n";
-    return 1;
-  }
+  Config cfg;
+  ParseResult parsed = parseArgs(argc, argv, cfg);
+  if(parsed == ParseResult::Exit) return 0;
+  if(parsed == ParseResult::Error) return 1;
+
+  if(!cfg.seeded) cfg.seed = std::random_device{}();
+  rng.seed(cfg.seed);
+  std::cerr << "seed " << cfg.seed << ", top_k " << cfg.top_k
+            << ", temperature " << cfg.temperature
+            << ", max_new_tokens " << cfg.max_new_tokens << "\n";
 
   std::string model_path = argv[1];
   std::string tokenizer_path = argv[2];
@@ -432,7 +439,7 @@ int main(int argc, char* argv[]) {
   pending.push(prompt_ids);
 
   Weights weights;
-  if(loadWeights(weights, argv[1])) return 1;
+  if(loadWeights(weights, cfg.model_path)) return 1;
 
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
@@ -482,6 +489,9 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  std::queue<std::vector<int>> pending;
+  for(const std::vector<int>& prompt : cfg.prompts) pending.push(prompt);
+
   std::vector<SlotState> slots(MAX_SEQUENCES);
 
   while(true) {
@@ -492,7 +502,7 @@ int main(int argc, char* argv[]) {
       pending.pop();
       int prompt_len = prompt.size();
 
-      prefill(prompt, prompt_len, s,
+      prefill(prompt, prompt_len, s, cfg,
               weights, cublas_handle, kv_cache,
               gpu_input_tokens, hidden_state, rms_norms,
               q_proj, k_proj, v_proj, attn_scores, attn_out, o_proj,
@@ -507,7 +517,7 @@ int main(int argc, char* argv[]) {
     for(const SlotState& s : slots) if(s.active) num_active++;
     if(num_active == 0) break;
 
-    decode(slots,
+    decode(slots, cfg,
                weights, cublas_handle, kv_cache,
                gpu_input_tokens, gpu_positions, hidden_state, rms_norms,
                q_proj, k_proj, v_proj, attn_scores, attn_out, o_proj,
@@ -515,7 +525,7 @@ int main(int argc, char* argv[]) {
                logits, gpu_sampled_tokens, gpu_rand);
 
     for(int s=0; s<MAX_SEQUENCES; s++) {
-      if(!slots[s].active || !isFinished(slots[s])) continue;
+      if(!slots[s].active || !isFinished(slots[s], cfg.max_new_tokens)) continue;
 
       std::cout << "slot " << s << " done, " << slots[s].generated.size() << " tokens:";
       for(int t : slots[s].generated) std::cout << " " << t;

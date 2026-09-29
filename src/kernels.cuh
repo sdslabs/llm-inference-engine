@@ -62,3 +62,5 @@ void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim);
 
 void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_rand,
                 int num_rows, int k, float temperature);
+
+void logProbs(const bf16* logits, const int* targets, float* out_logprobs, int num_rows);
