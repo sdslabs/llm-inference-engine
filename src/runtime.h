@@ -42,10 +42,13 @@ struct Buffers {
   bf16* up = nullptr;
   bf16* down = nullptr;
 
-  bf16* logits = nullptr;               // one row per active slot
+  bf16* logits = nullptr;               // one row per active slot, or per prompt token when scoring
   int* gpu_sampled_tokens = nullptr;
   float* gpu_rand = nullptr;
 
-  int allocate();
+  int* gpu_targets = nullptr;           // score mode only
+  float* gpu_logprobs = nullptr;        // score mode only
+
+  int allocate(bool score_mode = false);
   void free();
 };

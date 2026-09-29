@@ -14,8 +14,11 @@
 #include "config.h"
 #include "runtime.h"
 #include "model.h"
+#include "score.h"
+#include "telemetry.h"
 
 struct Request {
+  std::string id;
   std::vector<int> tokens;
   std::string text;
 };
@@ -45,6 +48,17 @@ int main(int argc, char* argv[]) {
             << ", temperature " << cfg.temperature
             << ", max_new_tokens " << cfg.max_new_tokens << "\n";
 
+  std::ofstream output_file;
+  std::ostream* out = &std::cout;
+  if(!cfg.output_path.empty()) {
+    output_file.open(cfg.output_path);
+    if(!output_file.is_open()) {
+      std::cerr << "Cannot open output file " << cfg.output_path << "\n";
+      return 1;
+    }
+    out = &output_file;
+  }
+
   auto tokenizer = loadNativeTokenizer(cfg.tokenizer_path);
 
   std::queue<Request> pending;
@@ -53,10 +67,11 @@ int main(int argc, char* argv[]) {
     if(prompt_ids.empty() || prompt_ids[0] != 128000) {
       prompt_ids.insert(prompt_ids.begin(), 128000);
     }
-    pending.push(Request{std::move(prompt_ids), cfg.prompt_text});
+    pending.push(Request{"0", std::move(prompt_ids), cfg.prompt_text});
   } else {
-    for(const std::vector<int>& tokens : cfg.prompts) {
-      pending.push(Request{tokens, tokenizer->Decode(tokens)});
+    for(size_t i=0; i<cfg.prompts.size(); i++) {
+      const std::vector<int>& tokens = cfg.prompts[i];
+      pending.push(Request{cfg.prompt_ids[i], tokens, tokenizer->Decode(tokens)});
     }
   }
 
@@ -70,11 +85,19 @@ int main(int argc, char* argv[]) {
   init_rope_frequencies(HEAD_DIM, MAX_SEQ_LEN, 500000.0f, 32.0f, 1.0f, 4.0f, 8192);
 
   Buffers buf;
-  if(buf.allocate()) return 1;
+  if(buf.allocate(cfg.score_mode)) return 1;
 
   std::vector<SlotState> slots(MAX_SEQUENCES);
+  int num_requests = (int)pending.size();
+  Recorder recorder(*out);
 
-  while(true) {
+  while(cfg.score_mode && !pending.empty()) {
+    Request request = pending.front();
+    pending.pop();
+    scoreSequence(request.tokens, request.id, weights, cublas_handle, buf, *out);
+  }
+
+  while(!cfg.score_mode) {
     for(int s=0; s<MAX_SEQUENCES && !pending.empty(); s++) {
       if(slots[s].active) continue;
 
@@ -86,7 +109,8 @@ int main(int argc, char* argv[]) {
 
       if(slots[s].active) {
         slots[s].prompt_text = request.text;
-        std::cout << "slot " << s << " prefilled " << prompt_len << " tokens\n";
+        recorder.onPrefill(s, slots[s]);
+        std::cerr << "slot " << s << " prefilled " << prompt_len << " tokens\n";
       }
     }
 
@@ -95,23 +119,26 @@ int main(int argc, char* argv[]) {
     if(num_active == 0) break;
 
     decode(slots, cfg, weights, cublas_handle, buf);
+    recorder.onDecodeStep(slots);
 
     for(int s=0; s<MAX_SEQUENCES; s++) {
-      if(!slots[s].active || !isFinished(slots[s], cfg.max_new_tokens)) continue;
-
-      std::cout << "slot " << s << " done, " << slots[s].generated.size() << " tokens:";
-      for(int t : slots[s].generated) std::cout << " " << t;
-      std::cout << std::endl;
+      if(!slots[s].active) continue;
+      const char* reason = finishReason(slots[s], cfg.max_new_tokens);
+      if(!reason) continue;
 
       std::string generated_text = tokenizer->Decode(slots[s].generated);
-      std::cout << "Ouput -> \n";
-      std::cout << slots[s].prompt_text << generated_text << "\n";
+      recorder.onFinish(s, slots[s], reason, generated_text);
+
+      std::cerr << "slot " << s << " done, " << slots[s].generated.size()
+                << " tokens, " << reason << "\n";
+      std::cerr << slots[s].prompt_text << generated_text << "\n";
 
       slots[s] = SlotState{};
     }
   }
 
   cudaDeviceSynchronize();
+  recorder.writeRun(cfg, num_requests);
 
   buf.free();
   free_rope_frequencies();

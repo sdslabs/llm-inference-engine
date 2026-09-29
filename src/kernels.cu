@@ -86,7 +86,7 @@ __global__ void softmaxKernel(bf16* input, int num_tokens) {
 
 void softmax(bf16* input, int num_tokens) {
   if(num_tokens > MAX_NUM_THREAD) {
-    std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on current GPU";
+    std::cerr << "Can't launch more than " << MAX_NUM_THREAD << " threads on current GPU";
     return;
   }
 
@@ -109,7 +109,7 @@ __global__ void residualKernel(bf16* input, bf16* residual) {
 void residualAdd(bf16* input, bf16* residual, int num_tokens) {
   residualKernel<<<num_tokens, E_DIM/2>>>(input, residual);
   cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
+  if(error != cudaError::cudaSuccess) std::cerr << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 }
 
 __global__ void siluKernel(bf16* a, bf16* b) {
@@ -122,7 +122,7 @@ __global__ void siluKernel(bf16* a, bf16* b) {
 void silu(bf16* a, bf16* b, int num_tokens) {
   siluKernel<<<num_tokens, MAX_NUM_THREAD>>>(a, b);
   cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
+  if(error != cudaError::cudaSuccess) std::cerr << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 
 }
 
@@ -137,13 +137,13 @@ __global__ void causalMaskKernel(bf16* input, int num_tokens) {
 
 void causalMask(bf16* input, int num_tokens) {
   if(num_tokens > MAX_NUM_THREAD) {
-    std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, Causal mask kernel not launched";
+    std::cerr << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, Causal mask kernel not launched";
     return;
   }
 
   causalMaskKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
   cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
+  if(error != cudaError::cudaSuccess) std::cerr << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 
 }
 
@@ -245,13 +245,13 @@ __global__ void ropeKernel(bf16* input, int num_tokens, int proj_dim,
 void rope(bf16* input, int num_tokens, int proj_dim) {
   int num_threads = proj_dim / 2;
   if(num_threads > MAX_NUM_THREAD) {
-    std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
+    std::cerr << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
     return;
   }
 
   ropeKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim, HEAD_DIM, d_cos_table, d_sin_table);
   cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) std::cout << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
+  if(error != cudaError::cudaSuccess) std::cerr << "CUDA last error : " << cudaGetErrorString(error) << std::endl;
 
 }
 
@@ -332,14 +332,14 @@ void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim)
 {
     int num_threads = proj_dim / 2;
     if (num_threads > MAX_NUM_THREAD) {
-        std::cout << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
+        std::cerr << "Can't launch more than " << MAX_NUM_THREAD << " threads on this GPU, RoPE kernel not launched";
         return;
     }
 
     ropeKernelDecode<<<num_rows, num_threads>>>(input, positions, proj_dim, d_cos_table, d_sin_table);
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess) {
-        std::cout << "CUDA last error: " << cudaGetErrorString(error) << std::endl;
+        std::cerr << "CUDA last error: " << cudaGetErrorString(error) << std::endl;
     }
 }
 

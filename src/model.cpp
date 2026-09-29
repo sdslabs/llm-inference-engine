@@ -33,13 +33,17 @@ static void sampleTokens(const bf16* logits, int* gpu_sampled_tokens, float* gpu
   cudaMemcpy(tokens.data(), gpu_sampled_tokens, num_rows*sizeof(int), cudaMemcpyDeviceToHost);
 }
 
-bool isFinished(const SlotState& s, int max_new_tokens) {
-  if(s.generated.empty()) return false;
+const char* finishReason(const SlotState& s, int max_new_tokens) {
+  if(s.generated.empty()) return nullptr;
   int t = s.generated.back();
-  return t == END_OF_TEXT_TOKEN_ID
-      || t == EOT_ID_TOKEN_ID
-      || (int)s.generated.size() >= max_new_tokens
-      || s.seq_len >= MAX_SEQ_LEN;
+  if(t == END_OF_TEXT_TOKEN_ID || t == EOT_ID_TOKEN_ID) return "stop";
+  if((int)s.generated.size() >= max_new_tokens) return "length";
+  if(s.seq_len >= MAX_SEQ_LEN) return "context";
+  return nullptr;
+}
+
+bool isFinished(const SlotState& s, int max_new_tokens) {
+  return finishReason(s, max_new_tokens) != nullptr;
 }
 
 // Y[T, OUT] = X[T, IN] @ W[OUT, IN]^T, all row major
@@ -54,14 +58,15 @@ static void linear(cublasHandle_t h, const bf16* X, const bf16* W, bf16* Y,
                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 }
 
-void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& cfg,
-             Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
-             std::vector<SlotState>& slots) {
-  if(prompt_len > MAX_PROMPT_LEN) {
-    std::cerr << "Prompt of " << prompt_len << " tokens exceeds MAX_PROMPT_LEN\n";
-    return;
-  }
+void projectLogits(cublasHandle_t cublas_handle, const bf16* hidden, Weights& weights,
+                   bf16* logits, int rows) {
+  linear(cublas_handle, hidden, weights.embed_tokens, logits, rows, E_DIM, VOCAB_SIZE);
+}
 
+// embedding -> N_LAYERS -> final rmsNorm. leaves the normalized hidden states
+// for every prompt position in buf.rms_norms, one E_DIM row per token.
+void forwardPrefill(const std::vector<int>& prompt, int prompt_len, int slot,
+                    Weights& weights, cublasHandle_t cublas_handle, Buffers& buf) {
   bf16* kv_cache = buf.kv_cache;
   int* gpu_input_tokens = buf.gpu_input_tokens;
   bf16* hidden_state = buf.hidden_state;
@@ -75,7 +80,6 @@ void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& c
   bf16* gate = buf.gate;
   bf16* up = buf.up;
   bf16* down = buf.down;
-  bf16* logits = buf.logits;
 
   bf16* slot_cache = slotCache(kv_cache, slot);
 
@@ -140,11 +144,24 @@ void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& c
   }
 
   rmsNorm(hidden_state, rms_norms, weights.norm, prompt_len);
-  bf16* last = rms_norms + (prompt_len-1)*E_DIM;
-  linear(cublas_handle, last, weights.embed_tokens, logits, 1, E_DIM, VOCAB_SIZE);
+}
+
+void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& cfg,
+             Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
+             std::vector<SlotState>& slots) {
+  if(prompt_len > MAX_PROMPT_LEN) {
+    std::cerr << "Prompt of " << prompt_len << " tokens exceeds MAX_PROMPT_LEN\n";
+    return;
+  }
+
+  forwardPrefill(prompt, prompt_len, slot, weights, cublas_handle, buf);
+
+  // generation only needs the distribution after the last prompt token
+  bf16* last = buf.rms_norms + (prompt_len-1)*E_DIM;
+  linear(cublas_handle, last, weights.embed_tokens, buf.logits, 1, E_DIM, VOCAB_SIZE);
 
   std::vector<int> sampled;
-  sampleTokens(logits, buf.gpu_sampled_tokens, buf.gpu_rand, 1, cfg.top_k, cfg.temperature, sampled);
+  sampleTokens(buf.logits, buf.gpu_sampled_tokens, buf.gpu_rand, 1, cfg.top_k, cfg.temperature, sampled);
 
   slots[slot].active = true;
   slots[slot].seq_len = prompt_len;

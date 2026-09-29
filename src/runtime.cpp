@@ -22,17 +22,17 @@ int checkGPUStatus() {
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
-  std::cout << "Device: " << prop.name << "\n";
-  std::cout << "Compute capability: " << prop.major << "." << prop.minor << "\n";
-  std::cout << "Global memory: " << prop.totalGlobalMem / B_TO_MB << " MB\n";
-  std::cout << "SM count: " << prop.multiProcessorCount << "\n";
-  std::cout << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
+  std::cerr << "Device: " << prop.name << "\n";
+  std::cerr << "Compute capability: " << prop.major << "." << prop.minor << "\n";
+  std::cerr << "Global memory: " << prop.totalGlobalMem / B_TO_MB << " MB\n";
+  std::cerr << "SM count: " << prop.multiProcessorCount << "\n";
+  std::cerr << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
 
   size_t free_mem;
   size_t total_mem;
   cudaMemGetInfo(&free_mem, &total_mem);
 
-  std::cout << "Free memory: " << free_mem / B_TO_GB << "GB, total memory: " << total_mem / B_TO_GB << "GB\n";
+  std::cerr << "Free memory: " << free_mem / B_TO_GB << "GB, total memory: " << total_mem / B_TO_GB << "GB\n";
   return 0;
 }
 
@@ -93,7 +93,7 @@ int loadWeights(Weights &weights, fs::path model_path) {
   return 0;
 }
 
-int Buffers::allocate() {
+int Buffers::allocate(bool score_mode) {
   // persistent, one independent span per slot
   cudaMalloc(&kv_cache, (size_t)MAX_SEQUENCES * N_LAYERS * 2 * MAX_SEQ_LEN * KV_DIM * sizeof(bf16));
 
@@ -116,11 +116,18 @@ int Buffers::allocate() {
   cudaMalloc(&up,   (size_t)MAX_PROMPT_LEN * INTERMEDIATE_DIM * sizeof(bf16));
   cudaMalloc(&down, (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
 
-  // output. decode needs one logit row per active slot, prefill only uses row 0
-  cudaMalloc(&logits, (size_t)MAX_SEQUENCES * VOCAB_SIZE * sizeof(bf16));
+  // output. decode needs one logit row per active slot, prefill only uses row 0.
+  // scoring needs every prompt position at once, which is 128x larger
+  size_t logit_rows = score_mode ? (size_t)MAX_PROMPT_LEN : (size_t)MAX_SEQUENCES;
+  cudaMalloc(&logits, logit_rows * VOCAB_SIZE * sizeof(bf16));
 
   cudaMalloc(&gpu_sampled_tokens, (size_t)MAX_SEQUENCES * sizeof(int));
   cudaMalloc(&gpu_rand,           (size_t)MAX_SEQUENCES * sizeof(float));
+
+  if(score_mode) {
+    cudaMalloc(&gpu_targets,  (size_t)MAX_PROMPT_LEN * sizeof(int));
+    cudaMalloc(&gpu_logprobs, (size_t)MAX_PROMPT_LEN * sizeof(float));
+  }
 
   if(cudaGetLastError() != cudaSuccess) {
     std::cerr << "Buffer allocation failed\n";
@@ -137,4 +144,5 @@ void Buffers::free() {
   cudaFree(attn_scores); cudaFree(attn_out); cudaFree(o_proj);
   cudaFree(gate); cudaFree(up); cudaFree(down);
   cudaFree(logits); cudaFree(gpu_sampled_tokens); cudaFree(gpu_rand);
+  cudaFree(gpu_targets); cudaFree(gpu_logprobs);
 }

@@ -32,12 +32,14 @@ mkdir -p build
 
 TOKENIZERS_DIR="external/tokenizers-cpp"
 
-echo "Compiling CUDA Kernels..."
-nvcc -O3 -c src/kernels.cu -o build/kernels.o
+ARCH="${ARCH:-sm_89}"
+
+echo "Compiling CUDA Kernels for $ARCH..."
+nvcc -O3 -arch="$ARCH" -c src/kernels.cu -o build/kernels.o
 
 echo "Compiling Main Binary..."
 g++ -O3 -std=c++17 \
-    src/main.cpp src/config.cpp src/runtime.cpp src/model.cpp \
+    src/main.cpp src/config.cpp src/runtime.cpp src/model.cpp src/score.cpp src/telemetry.cpp \
     build/kernels.o \
     -o build/engine \
     -Isrc \
