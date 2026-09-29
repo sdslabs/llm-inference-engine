@@ -1,16 +1,33 @@
+#include <tokenizers_cpp.h>
 #include <nlohmann/json.hpp>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <iostream>
-#include <queue>
 #include <filesystem>
+#include <queue>
 #include <fstream>
 #include <random>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include "kernels.cuh"
 #include "config.h"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+// Load Hugging Face tokenizer.json
+std::unique_ptr<tokenizers::Tokenizer> loadNativeTokenizer(const std::string& tokenizer_json_path) {
+  std::ifstream file(tokenizer_json_path);
+  if(!file.is_open()) {
+    throw std::runtime_error("Failed to open tokenizer file: " + tokenizer_json_path);
+  }
+
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+
+  return tokenizers::Tokenizer::FromBlobJSON(buffer.str());
+}
 
 int checkGPUStatus() {
   int device_count = 0;
@@ -406,6 +423,21 @@ int main(int argc, char* argv[]) {
             << ", temperature " << cfg.temperature
             << ", max_new_tokens " << cfg.max_new_tokens << "\n";
 
+  std::string model_path = argv[1];
+  std::string tokenizer_path = argv[2];
+  std::string prompt_text = argv[3];
+
+  // Initialize the tokenizer
+  auto tokenizer = loadNativeTokenizer(tokenizer_path);
+  std::vector<int> prompt_ids = tokenizer->Encode(prompt_text);
+  
+  if(prompt_ids.empty() || prompt_ids[0] != 128000) {
+    prompt_ids.insert(prompt_ids.begin(), 128000);
+  }
+
+  std::queue<std::vector<int>> pending;
+  pending.push(prompt_ids);
+
   Weights weights;
   if(loadWeights(weights, cfg.model_path)) return 1;
 
@@ -498,6 +530,10 @@ int main(int argc, char* argv[]) {
       std::cout << "slot " << s << " done, " << slots[s].generated.size() << " tokens:";
       for(int t : slots[s].generated) std::cout << " " << t;
       std::cout << std::endl;
+
+      std::string generated_text = tokenizer->Decode(slots[0].generated);
+      std::cout << "Ouput -> \n";
+      std::cout << prompt_text << generated_text << "\n";
 
       slots[s] = SlotState{};
     }

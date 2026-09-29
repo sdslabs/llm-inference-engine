@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+set -e
+
+# Dynamically locate CUDA directory
+if [ -z "$CUDA_PATH" ]; then
+    if [ -d "/usr/local/cuda" ]; then
+        CUDA_PATH="/usr/local/cuda"
+    elif [ -d "/opt/cuda" ]; then
+        CUDA_PATH="/opt/cuda"
+    else
+        NVCC_PATH=$(command -v nvcc || echo "/usr/bin/nvcc")
+        CUDA_PATH="$(dirname "$(dirname "$NVCC_PATH")")"
+    fi
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -20,53 +32,22 @@ if ! command -v nvcc >/dev/null; then
   exit 1
 fi
 
-FLAGS=(-std=c++17 -arch="$ARCH" -Xcompiler -Wall)
-if [[ "${DEBUG:-0}" == "1" ]]; then
-  MODE=debug
-  FLAGS+=(-O0 -g -G)
-else
-  MODE=release
-  FLAGS+=(-O3 -lineinfo)
-fi
+echo "Using CUDA path: $CUDA_PATH"
 
-stale() {
-  local obj="$1"
-  shift
-  [[ -f "$obj" ]] || return 0
-  local dep
-  for dep in "$@"; do
-    if [[ "$dep" -nt "$obj" ]]; then return 0; fi
-  done
-  return 1
-}
+mkdir -p build
 
-mkdir -p "$BUILD_DIR"
-echo "$MODE $ARCH"
+TOKENIZERS_DIR="external/tokenizers-cpp"
 
-objects=()
-pids=()
-for src in "${SOURCES[@]}"; do
-  obj="$BUILD_DIR/$(basename "${src%.*}").$MODE.o"
-  objects+=("$obj")
-  if stale "$obj" "$src" "${HEADERS[@]}"; then
-    echo "  compile $src"
-    nvcc "${FLAGS[@]}" -c "$src" -o "$obj" &
-    pids+=("$!")
-  fi
-done
+echo "Compiling CUDA Kernels..."
+nvcc -O3 -c src/kernels.cu -o build/kernels.o
 
-failed=0
-for pid in ${pids[@]+"${pids[@]}"}; do
-  wait "$pid" || failed=1
-done
-if [[ "$failed" != "0" ]]; then
-  echo "compilation failed, $TARGET not updated" >&2
-  exit 1
-fi
+echo "Compiling Main Binary..."
+g++ -O3 src/main.cpp build/kernels.o \
+    -o build/engine \
+    -Isrc \
+    -I${TOKENIZERS_DIR}/include \
+    -I${CUDA_PATH}/include \
+    -L${TOKENIZERS_DIR}/build -ltokenizers_cpp -ltokenizers_c \
+    -L${CUDA_PATH}/lib64 -lcudart -lcublas
 
-if stale "$TARGET" "${objects[@]}"; then
-  echo "  link    $TARGET"
-  nvcc -arch="$ARCH" "${objects[@]}" -lcublas -o "$TARGET"
-else
-  echo "  $TARGET up to date"
-fi
+echo "Build complete: ./build/engine"
