@@ -173,9 +173,6 @@ void init_rope_frequencies(
     }
   }
 
-  cudaMalloc(&d_inv_freq, half_dim*sizeof(float));
-  cudaMemcpy(d_inv_freq, inv_freq_llama.data(), half_dim*sizeof(float), cudaMemcpyHostToDevice);
-
   std::vector<float> cos_table(max_seq_len * head_dim);
     std::vector<float> sin_table(max_seq_len * head_dim);
 
@@ -200,10 +197,6 @@ void init_rope_frequencies(
 
 void free_rope_frequencies(void)
 {
-  if (d_inv_freq) {
-     cudaFree(d_inv_freq);
-     d_inv_freq = nullptr;
-  }
   if (d_cos_table) {
      cudaFree(d_cos_table);
      d_cos_table = nullptr;

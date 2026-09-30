@@ -39,6 +39,7 @@ void Recorder::onFinish(int slot, const SlotState& slot_state, const char* reaso
 
   json record;
   record["type"] = "request";
+  record["id"] = slot_state.id;
   record["slot"] = slot;
   record["prompt"] = slot_state.prompt_text;
   record["prompt_tokens"] = slot_state.seq_len - (int)slot_state.generated.size() + 1;

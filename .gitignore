@@ -5,3 +5,5 @@
 /python/models/
 /build
 /models/
+.env
+/eval/__pycache__

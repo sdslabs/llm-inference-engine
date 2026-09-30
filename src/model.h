@@ -11,6 +11,7 @@ struct SlotState {
   int seq_len = 0;
   int last_token = 0;
   std::vector<int> generated;
+  std::string id;
   std::string prompt_text;
 };
 

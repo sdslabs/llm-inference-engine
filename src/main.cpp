@@ -108,6 +108,7 @@ int main(int argc, char* argv[]) {
       prefill(request.tokens, prompt_len, s, cfg, weights, cublas_handle, buf, slots);
 
       if(slots[s].active) {
+        slots[s].id = request.id;
         slots[s].prompt_text = request.text;
         recorder.onPrefill(s, slots[s]);
         std::cerr << "slot " << s << " prefilled " << prompt_len << " tokens\n";

@@ -227,33 +227,35 @@ void decode(std::vector<SlotState>& slots, const Config& cfg,
       KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
     }
 
+    // GQA_Q_TO_K_RATIO query heads share one K/V head, so each group is a
+    // single GEMM over that group and the NUM_K_HEADS groups sit at constant
+    // strides. One batched call replaces NUM_Q_HEADS separate GEMVs.
     for(int b=0; b<B; b++) {
       int len = batch_positions[b] + 1;
       bf16* Sc = slotCache(kv_cache, active[b]);
       bf16* Sb = attn_scores + (size_t)b*NUM_Q_HEADS*MAX_SEQ_LEN;
 
-      for(int h=0; h<NUM_Q_HEADS; h++) {
-        const bf16* Qh = q_proj + (size_t)b*E_DIM + h*HEAD_DIM;
-        const bf16* Kh = layerK(Sc, layer) + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
-        bf16* Sh = Sb + (size_t)h*MAX_SEQ_LEN;
-        cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, len, 1, HEAD_DIM,
-                     &scale, Kh, CUDA_R_16BF, KV_DIM, Qh, CUDA_R_16BF, E_DIM,
-                     &zero,  Sh, CUDA_R_16BF, len,
-                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-      }
+      cublasGemmStridedBatchedEx(
+          cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+          len, GQA_Q_TO_K_RATIO, HEAD_DIM,
+          &scale,
+          layerK(Sc, layer),            CUDA_R_16BF, KV_DIM,      (long long)HEAD_DIM,
+          q_proj + (size_t)b*E_DIM,     CUDA_R_16BF, HEAD_DIM,    (long long)GQA_Q_TO_K_RATIO*HEAD_DIM,
+          &zero,
+          Sb,                           CUDA_R_16BF, MAX_SEQ_LEN, (long long)GQA_Q_TO_K_RATIO*MAX_SEQ_LEN,
+          NUM_K_HEADS, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 
       decodeSoftmax(Sb, len);
 
-      for(int h=0; h<NUM_Q_HEADS; h++) {
-        const bf16* Vh = layerV(Sc, layer) + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
-        const bf16* Sh = Sb + (size_t)h*MAX_SEQ_LEN;
-        bf16* Oh = attn_out + (size_t)b*E_DIM + h*HEAD_DIM;
-        cublasGemmEx(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, HEAD_DIM, 1, len,
-                     &one,  Vh, CUDA_R_16BF, KV_DIM, Sh, CUDA_R_16BF, len, &zero,
-                     Oh, CUDA_R_16BF, E_DIM,
-                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-      }
-
+      cublasGemmStridedBatchedEx(
+          cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+          HEAD_DIM, GQA_Q_TO_K_RATIO, len,
+          &one,
+          layerV(Sc, layer),            CUDA_R_16BF, KV_DIM,      (long long)HEAD_DIM,
+          Sb,                           CUDA_R_16BF, MAX_SEQ_LEN, (long long)GQA_Q_TO_K_RATIO*MAX_SEQ_LEN,
+          &zero,
+          attn_out + (size_t)b*E_DIM,   CUDA_R_16BF, HEAD_DIM,    (long long)GQA_Q_TO_K_RATIO*HEAD_DIM,
+          NUM_K_HEADS, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     }
 
     linear(cublas_handle, attn_out, weights.w_o[layer], o_proj, B, E_DIM, E_DIM);
