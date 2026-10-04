@@ -48,7 +48,7 @@ mkdir -p build
 
 TOKENIZERS_DIR="external/tokenizers-cpp"
 
-ARCH="${ARCH:-sm_89}"
+ARCH="${ARCH:-native}"
 
 # Limits that size fixed arrays and shared memory. Runtime values live in the
 # model's config.json instead; these have to be baked in.
