@@ -7,3 +7,4 @@
 /models/
 .env
 /eval/__pycache__
+/nob
