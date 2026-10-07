@@ -21,6 +21,7 @@ struct Recorder {
   void onDecodeStep(const std::vector<SlotState>& slots);
   void onFinish(int slot, const SlotState& slot_state, const char* reason,
                 const std::string& text);
+  void onScore(int num_scored);
   void writeRun(const Config& cfg, int num_requests);
 
 private:
@@ -31,4 +32,5 @@ private:
   SlotTiming timing[MAX_SEQUENCES];
   int completed = 0;
   long long generated_tokens = 0;
+  long long scored_tokens = 0;
 };

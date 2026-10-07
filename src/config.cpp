@@ -1,15 +1,14 @@
 #include "config.h"
-#include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
 
-using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 static void usage(const char* prog) {
   std::cerr
-    << "Usage: " << prog << " <model.safetensors> <tokenizer.json> \"<prompt>\" [options]\n\n"
-    << "  --prompts <file.jsonl>   one request per line: [ids] or {\"id\":..,\"tokens\":[ids]}\n"
+    << "Usage: " << prog << " <model.safetensors> <tokenizer.json> <prompts.txt> [options]\n\n"
+    << "  prompts.txt              one prompt per line, plain text. blank lines are skipped.\n"
+    << "                           \\n \\r \\t \\\\ are unescaped, so a prompt can span lines\n\n"
     << "  --max-new-tokens <n>     default " << MAX_NEW_TOKENS_GENERATED << "\n"
     << "  --top-k <n>              default " << TOP_K << "\n"
     << "  --temperature <f>        default " << TEMPERATURE << "\n"
@@ -17,6 +16,27 @@ static void usage(const char* prog) {
     << "  --seed <n>               seed the sampler, default nondeterministic\n"
     << "  --score                  emit per token logprobs instead of generating\n"
     << "  --output <file.jsonl>    default stdout\n";
+}
+
+static std::string unescape(const std::string& line) {
+  std::string out;
+  out.reserve(line.size());
+
+  for(size_t i=0; i<line.size(); i++) {
+    if(line[i] != '\\' || i+1 >= line.size()) {
+      out.push_back(line[i]);
+      continue;
+    }
+    char next = line[++i];
+    switch(next) {
+      case 'n':  out.push_back('\n'); break;
+      case 'r':  out.push_back('\r'); break;
+      case 't':  out.push_back('\t'); break;
+      case '\\': out.push_back('\\'); break;
+      default:   out.push_back('\\'); out.push_back(next); break;
+    }
+  }
+  return out;
 }
 
 static int loadPrompts(const fs::path& path, Config& cfg) {
@@ -27,38 +47,16 @@ static int loadPrompts(const fs::path& path, Config& cfg) {
   }
 
   std::string line;
-  int line_no = 0;
   while(std::getline(file, line)) {
-    line_no++;
-    if(line.find_first_not_of(" \t\r\n") == std::string::npos) continue;
-
-    std::vector<int> tokens;
-    std::string id = std::to_string(cfg.prompts.size());
-
-    try {
-      json parsed = json::parse(line);
-      if(parsed.is_array()) {
-        tokens = parsed.get<std::vector<int>>();
-      } else {
-        tokens = parsed.at("tokens").get<std::vector<int>>();
-        if(parsed.contains("id")) {
-          id = parsed["id"].is_string() ? parsed["id"].get<std::string>() : parsed["id"].dump();
-        }
-      }
-    } catch(const std::exception& e) {
-      std::cerr << path.string() << ":" << line_no << ": " << e.what() << "\n";
-      return 1;
-    }
-
-    if(tokens.empty()) {
-      std::cerr << path.string() << ":" << line_no << ": empty token list\n";
-      return 1;
-    }
-
-    cfg.prompts.push_back(std::move(tokens));
-    cfg.prompt_ids.push_back(std::move(id));
+    if(!line.empty() && line.back() == '\r') line.pop_back();
+    if(line.find_first_not_of(" \t") == std::string::npos) continue;
+    cfg.prompts.push_back(unescape(line));
   }
 
+  if(file.bad()) {
+    std::cerr << "Error reading prompts file " << path << "\n";
+    return 1;
+  }
   if(cfg.prompts.empty()) {
     std::cerr << "No prompts found in " << path << "\n";
     return 1;
@@ -68,7 +66,6 @@ static int loadPrompts(const fs::path& path, Config& cfg) {
 
 ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
   std::vector<std::string> positional;
-  fs::path prompts_file;
   bool missing_value = false;
 
   for(int i=1; i<argc; i++) {
@@ -87,8 +84,6 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
       if(arg == "--help" || arg == "-h") {
         usage(argv[0]);
         return ParseResult::Exit;
-      } else if(arg == "--prompts") {
-        prompts_file = value("--prompts");
       } else if(arg == "--max-new-tokens") {
         std::string v = value("--max-new-tokens");
         if(!v.empty()) cfg.max_new_tokens = std::stoi(v);
@@ -122,16 +117,15 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
     if(missing_value) return ParseResult::Error;
   }
 
-  size_t required = prompts_file.empty() ? 3 : 2;
-  if(positional.size() < required) {
+  if(positional.size() != 3) {
     usage(argv[0]);
     return ParseResult::Error;
   }
   cfg.model_path = positional[0];
   cfg.tokenizer_path = positional[1];
-  if(positional.size() > 2) cfg.prompt_text = positional[2];
+  cfg.prompts_path = positional[2];
 
-  if(!prompts_file.empty() && loadPrompts(prompts_file, cfg)) return ParseResult::Error;
+  if(loadPrompts(cfg.prompts_path, cfg)) return ParseResult::Error;
 
   if(cfg.greedy) cfg.top_k = 1;
 
@@ -146,19 +140,6 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
   if(cfg.temperature <= 0.0f) {
     std::cerr << "--temperature must be positive\n";
     return ParseResult::Error;
-  }
-
-  for(size_t i=0; i<cfg.prompts.size(); i++) {
-    int len = (int)cfg.prompts[i].size();
-    if(len > MAX_PROMPT_LEN) {
-      std::cerr << "Prompt " << cfg.prompt_ids[i] << " has " << len
-                << " tokens, exceeds MAX_PROMPT_LEN of " << MAX_PROMPT_LEN << "\n";
-      return ParseResult::Error;
-    }
-    if(cfg.score_mode && len < 2) {
-      std::cerr << "Prompt " << cfg.prompt_ids[i] << " needs at least 2 tokens to score\n";
-      return ParseResult::Error;
-    }
   }
 
   return ParseResult::Ok;

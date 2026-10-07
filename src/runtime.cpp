@@ -1,6 +1,7 @@
 #include "runtime.h"
 #include <nlohmann/json.hpp>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -33,6 +34,107 @@ int checkGPUStatus() {
   cudaMemGetInfo(&free_mem, &total_mem);
 
   std::cerr << "Free memory: " << free_mem / B_TO_GB << "GB, total memory: " << total_mem / B_TO_GB << "GB\n";
+  return 0;
+}
+
+int loadModelConfig(ModelConfig& mc, const fs::path& model_path) {
+  fs::path config_path = model_path.parent_path() / "config.json";
+
+  std::ifstream file(config_path);
+  if(!file.is_open()) {
+    std::cerr << "No config.json next to " << model_path.filename().string()
+              << ", using the values the engine was built with\n";
+    return 0;
+  }
+
+  json cfg;
+  try {
+    file >> cfg;
+  } catch(const std::exception& e) {
+    std::cerr << config_path.string() << ": " << e.what() << "\n";
+    return 1;
+  }
+
+  mc.num_layers          = cfg.value("num_hidden_layers", mc.num_layers);
+  mc.hidden_size         = cfg.value("hidden_size", mc.hidden_size);
+  mc.intermediate_size   = cfg.value("intermediate_size", mc.intermediate_size);
+  mc.num_attention_heads = cfg.value("num_attention_heads", mc.num_attention_heads);
+  mc.num_key_value_heads = cfg.value("num_key_value_heads", mc.num_key_value_heads);
+  mc.vocab_size          = cfg.value("vocab_size", mc.vocab_size);
+  mc.rms_norm_eps        = cfg.value("rms_norm_eps", mc.rms_norm_eps);
+  mc.rope_theta          = cfg.value("rope_theta", mc.rope_theta);
+  mc.bos_token_id        = cfg.value("bos_token_id", mc.bos_token_id);
+
+  int derived_head_dim = mc.num_attention_heads > 0
+                       ? mc.hidden_size / mc.num_attention_heads : mc.head_dim;
+  mc.head_dim = cfg.value("head_dim", derived_head_dim);
+
+  if(cfg.contains("rope_scaling") && cfg["rope_scaling"].is_object()) {
+    const json& rs = cfg["rope_scaling"];
+    mc.rope_factor                = rs.value("factor", mc.rope_factor);
+    mc.rope_low_freq_factor       = rs.value("low_freq_factor", mc.rope_low_freq_factor);
+    mc.rope_high_freq_factor      = rs.value("high_freq_factor", mc.rope_high_freq_factor);
+    mc.rope_original_max_position = rs.value("original_max_position_embeddings",
+                                             mc.rope_original_max_position);
+  } else {
+    mc.rope_factor = 1.0f;
+  }
+
+  if(cfg.contains("eos_token_id")) {
+    const json& eos = cfg["eos_token_id"];
+    std::vector<int> ids;
+    if(eos.is_array()) ids = eos.get<std::vector<int>>();
+    else if(eos.is_number_integer()) ids.push_back(eos.get<int>());
+
+    for(int id : ids) {
+      if(std::find(mc.stop_token_ids.begin(), mc.stop_token_ids.end(), id)
+         == mc.stop_token_ids.end()) {
+        mc.stop_token_ids.push_back(id);
+      }
+    }
+  }
+
+  int mismatches = 0;
+  auto require = [&](const char* name, long long from_config, long long compiled) {
+    if(from_config == compiled) return;
+    std::cerr << config_path.string() << ": " << name << " is " << from_config
+              << ", engine built for " << compiled << "\n";
+    mismatches++;
+  };
+
+  require("num_hidden_layers", mc.num_layers, N_LAYERS);
+  require("hidden_size", mc.hidden_size, E_DIM);
+  require("intermediate_size", mc.intermediate_size, INTERMEDIATE_DIM);
+  require("num_attention_heads", mc.num_attention_heads, NUM_Q_HEADS);
+  require("num_key_value_heads", mc.num_key_value_heads, NUM_K_HEADS);
+  require("head_dim", mc.head_dim, HEAD_DIM);
+  require("vocab_size", mc.vocab_size, VOCAB_SIZE);
+  require("num_key_value_heads * head_dim",
+          (long long)mc.num_key_value_heads * mc.head_dim, KV_DIM);
+  if(mc.num_key_value_heads > 0) {
+    require("num_attention_heads / num_key_value_heads",
+            mc.num_attention_heads / mc.num_key_value_heads, GQA_Q_TO_K_RATIO);
+  }
+
+  if(!cfg.value("tie_word_embeddings", true)) {
+    std::cerr << config_path.string() << ": tie_word_embeddings is false, but the engine"
+              << " reuses embed_tokens as the output projection\n";
+    mismatches++;
+  }
+
+  std::string dtype = cfg.value("torch_dtype", std::string("bfloat16"));
+  if(dtype != "bfloat16") {
+    std::cerr << config_path.string() << ": torch_dtype is " << dtype
+              << ", the engine only reads bfloat16\n";
+    mismatches++;
+  }
+
+  if(mismatches > 0) {
+    std::cerr << mismatches << " mismatch(es) against the build. These sizes are compile time;"
+              << " change them in .env or src/kernels.cuh and rebuild\n";
+    return 1;
+  }
+
   return 0;
 }
 

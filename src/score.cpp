@@ -8,29 +8,33 @@
 
 using json = nlohmann::json;
 
-void scoreSequence(const std::vector<int>& tokens, const std::string& id,
-                   Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
-                   std::ostream& out) {
+int scoreSequence(const std::vector<int>& tokens, const std::string& id,
+                  Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
+                  std::ostream& out) {
   int num_tokens = (int)tokens.size();
   int num_targets = num_tokens - 1;
 
   if(num_targets < 1) {
     std::cerr << "Sequence " << id << " needs at least 2 tokens to score\n";
-    return;
+    return 0;
   }
   if(num_tokens > MAX_PROMPT_LEN) {
     std::cerr << "Sequence " << id << " of " << num_tokens
               << " tokens exceeds MAX_PROMPT_LEN\n";
-    return;
+    return 0;
   }
 
   auto start = std::chrono::steady_clock::now();
 
   forwardPrefill(tokens, num_tokens, 0, weights, cublas_handle, buf);
 
-  // row i holds the distribution over the token that follows tokens[i], so the
-  // last row has no target and is skipped
-  projectLogits(cublas_handle, buf.rms_norms, weights, buf.logits, num_targets);
+  const float alpha = 1.0f, beta = 0.0f;
+  cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+               VOCAB_SIZE, num_targets, E_DIM,
+               &alpha, weights.embed_tokens, CUDA_R_16BF, E_DIM,
+                       buf.rms_norms,        CUDA_R_16BF, E_DIM,
+               &beta,  buf.logits,           CUDA_R_16BF, VOCAB_SIZE,
+               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
 
   cudaMemcpy(buf.gpu_targets, tokens.data() + 1, num_targets*sizeof(int),
              cudaMemcpyHostToDevice);
@@ -59,4 +63,6 @@ void scoreSequence(const std::vector<int>& tokens, const std::string& id,
 
   out << record.dump() << "\n";
   out.flush();
+
+  return num_targets;
 }

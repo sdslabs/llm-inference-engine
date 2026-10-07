@@ -34,9 +34,9 @@ def reference_greedy(model, tokens, max_new_tokens):
         for _ in range(max_new_tokens):
             logits = model(ids).logits[0, -1]
             nxt = int(torch.argmax(logits))
-            generated.append(nxt)
-            if nxt in (128001, 128009):
+            if nxt in engine.STOP_TOKENS:
                 break
+            generated.append(nxt)
             ids = torch.cat([ids, torch.tensor([[nxt]])], dim=1)
     return generated
 
@@ -57,10 +57,10 @@ def main():
     parser.add_argument("--json", help="write full results here")
     args = parser.parse_args()
 
-    sequences = [(f"g{i}", engine.encode(text)) for i, text in enumerate(PROMPTS)]
+    sequences = [(f"g{i}", text) for i, text in enumerate(PROMPTS)]
 
     print(f"generating {len(sequences)} sequences through the engine (greedy)...")
-    records = engine.generate(prompts=sequences, greedy=True,
+    records = engine.generate(sequences, greedy=True,
                               max_new_tokens=args.max_new_tokens, seed=0)
     by_id = {r["id"]: r for r in records}
 
@@ -70,11 +70,21 @@ def main():
     rows = []
     divergences = []
     exact = 0
+    failures = 0
 
-    for (ident, tokens), text in zip(sequences, PROMPTS):
+    for ident, text in sequences:
         record = by_id.get(ident)
         if record is None:
             print(f"  {ident}: MISSING from engine output")
+            failures += 1
+            continue
+
+        tokens = engine.encode(text)
+        if record["prompt_tokens"] != len(tokens):
+            print(f"  FAIL {ident}: engine tokenized the prompt to "
+                  f"{record['prompt_tokens']} tokens, harness to {len(tokens)}. "
+                  f"Tokenizer mismatch, continuations are not comparable")
+            failures += 1
             continue
 
         engine_tokens = record["tokens"]
@@ -102,7 +112,7 @@ def main():
             print(f"        engine: {tok.decode(engine_tokens[max(0, index-2):index+3])!r}")
             print(f"        ref   : {tok.decode(reference_tokens[max(0, index-2):index+3])!r}")
 
-    if divergences:
+    if divergences and not failures:
         mean_div = statistics.mean(divergences)
         print(f"\nexact matches      : {exact}/{len(rows)}")
         print(f"mean first divergence: {mean_div:.1f} tokens (of {args.max_new_tokens})")
@@ -114,6 +124,8 @@ def main():
         print("PASS" if ok else
               f"FAIL, mean divergence below {floor:.1f} suggests a real bug")
     else:
+        if failures:
+            print(f"\n{failures}/{len(sequences)} sequences could not be compared")
         ok = False
 
     if args.json:

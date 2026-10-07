@@ -20,7 +20,13 @@ void embeddingGather(int* gpu_input_tokens, bf16* gpu_input_embeds, bf16* embed_
   }
 }
 
-__global__ void rmsNormKernel(bf16* input, bf16* output, bf16* norm_weights, int num_tokens) {
+static float h_rms_norm_eps = 1e-5f;
+
+void setRmsNormEps(float eps) {
+  if(eps > 0.0f) h_rms_norm_eps = eps;
+}
+
+__global__ void rmsNormKernel(bf16* input, bf16* output, bf16* norm_weights, int num_tokens, float eps) {
   __shared__ float rms_vector[E_DIM/2]; // array shared among all threads of a block 
 
   int workIdx = threadIdx.x + blockIdx.x*E_DIM;
@@ -35,7 +41,7 @@ __global__ void rmsNormKernel(bf16* input, bf16* output, bf16* norm_weights, int
       __syncthreads();
     }
 
-    if(threadIdx.x==0) rms_vector[0] = sqrtf( (rms_vector[0] / E_DIM) + 1.0e-5);
+    if(threadIdx.x==0) rms_vector[0] = sqrtf( (rms_vector[0] / E_DIM) + eps);
     __syncthreads();
 
     output[workIdx] = (bf16)( ((float)input[workIdx]/rms_vector[0]) * (float)norm_weights[threadIdx.x]);
@@ -45,7 +51,7 @@ __global__ void rmsNormKernel(bf16* input, bf16* output, bf16* norm_weights, int
 }
 
 void rmsNorm(bf16* input, bf16* output, bf16* norm_weights, int num_tokens) {
-  rmsNormKernel<<<num_tokens, E_DIM/2>>>(input, output, norm_weights, num_tokens);
+  rmsNormKernel<<<num_tokens, E_DIM/2>>>(input, output, norm_weights, num_tokens, h_rms_norm_eps);
   cudaError error = cudaGetLastError();
   if(error != cudaError::cudaSuccess) {
     std::cerr << "CUDA last error : " << cudaGetErrorString(error) << std::endl;

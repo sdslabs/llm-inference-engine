@@ -1,9 +1,33 @@
 #pragma once
 #include <cublas_v2.h>
 #include <filesystem>
+#include <vector>
 #include "kernels.cuh"
 
 int checkGPUStatus();
+
+struct ModelConfig {
+  int num_layers = N_LAYERS;
+  int hidden_size = E_DIM;
+  int intermediate_size = INTERMEDIATE_DIM;
+  int num_attention_heads = NUM_Q_HEADS;
+  int num_key_value_heads = NUM_K_HEADS;
+  int head_dim = HEAD_DIM;
+  int vocab_size = VOCAB_SIZE;
+
+  float rms_norm_eps = 1e-5f;
+
+  float rope_theta = 500000.0f;
+  float rope_factor = 32.0f;
+  float rope_low_freq_factor = 1.0f;
+  float rope_high_freq_factor = 4.0f;
+  int rope_original_max_position = 8192;
+
+  int bos_token_id = BOS_TOKEN_ID;
+  std::vector<int> stop_token_ids = {END_OF_TEXT_TOKEN_ID, EOT_ID_TOKEN_ID};
+};
+
+int loadModelConfig(ModelConfig& mc, const std::filesystem::path& model_path);
 
 // pointers to weight matrices on GPU
 struct Weights {

@@ -1,5 +1,6 @@
 /src/main
 *.o
+test.sh
 /engine
 /python/venv/
 /python/models/
@@ -8,3 +9,4 @@
 .env
 /eval/__pycache__
 /nob
+prompts.txt

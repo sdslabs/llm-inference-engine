@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--dataset", default="Salesforce/wikitext")
     parser.add_argument("--dataset-config", default="wikitext-2-raw-v1")
     parser.add_argument("--split", default="test")
-    parser.add_argument("--window", type=int, default=engine.MAX_PROMPT_LEN)
+    parser.add_argument("--window", type=int, default=engine.MAX_PROMPT_LEN - 1)
     parser.add_argument("--stride", type=int, default=0,
                         help="0 means non overlapping (stride = window)")
     parser.add_argument("--limit", type=int, default=0, help="cap number of windows")
@@ -70,31 +70,53 @@ def main():
     parser.add_argument("--json", help="write full results here")
     args = parser.parse_args()
 
-    if args.window > engine.MAX_PROMPT_LEN:
-        parser.error(f"--window exceeds engine MAX_PROMPT_LEN={engine.MAX_PROMPT_LEN}")
+    if args.window > engine.MAX_PROMPT_LEN - 1:
+        parser.error(f"--window must leave room for the BOS the engine prepends, "
+                     f"so at most MAX_PROMPT_LEN-1={engine.MAX_PROMPT_LEN - 1}")
     stride = args.stride or args.window
 
     print("tokenizing corpus...")
     text = load_text(args)
-    tokens = engine.encode(text)
+    tokens = engine.tokenizer().encode(text, add_special_tokens=False)
     chunks = windows(tokens, args.window, stride)
     if args.limit:
         chunks = chunks[:args.limit]
 
-    total_positions = sum(scored for _, scored in chunks)
-    print(f"{len(tokens)} tokens -> {len(chunks)} windows of <={args.window} "
+    sequences = []
+    scored_counts = []
+    token_ids = []
+    rejected = 0
+    for index, (chunk, scored) in enumerate(chunks):
+        window_text = engine.tokenizer().decode(chunk)
+        full_ids = engine.encode(window_text)
+        if full_ids[1:] != list(chunk):
+            rejected += 1
+            continue
+        sequences.append((f"w{index}", window_text))
+        scored_counts.append(scored)
+        token_ids.append(full_ids)
+
+    if not sequences:
+        sys.exit("no windows survived the decode/encode round trip")
+    if rejected:
+        print(f"dropped {rejected}/{len(chunks)} windows whose text does not "
+              f"re-tokenize to the same ids")
+
+    total_positions = sum(scored_counts)
+    print(f"{len(tokens)} tokens -> {len(sequences)} windows of <={args.window} "
           f"(stride {stride}, {total_positions} scored positions)")
 
-    sequences = [(f"w{i}", chunk) for i, (chunk, _) in enumerate(chunks)]
-    scored_counts = [scored for _, scored in chunks]
     results = engine.score(sequences)
 
     engine_sum = 0.0
     engine_count = 0
-    for (ident, _), scored in zip(sequences, scored_counts):
+    for (ident, _), scored, full_ids in zip(sequences, scored_counts, token_ids):
         record = results.get(ident)
         if record is None:
             sys.exit(f"engine returned no score for {ident}")
+        if record["num_tokens"] != len(full_ids):
+            sys.exit(f"{ident}: engine tokenized to {record['num_tokens']} tokens, "
+                     f"harness to {len(full_ids)}. Tokenizer mismatch")
         engine_sum += sum(record["logprobs"][-scored:])
         engine_count += scored
 
@@ -103,7 +125,8 @@ def main():
           f"(mean logprob {engine_sum/engine_count:+.4f}, {engine_count} positions)")
 
     summary = {
-        "windows": len(chunks),
+        "windows": len(sequences),
+        "windows_dropped": rejected,
         "window": args.window,
         "stride": stride,
         "positions": engine_count,
@@ -116,8 +139,8 @@ def main():
         model = engine.reference_model()
         reference_sum = 0.0
         reference_count = 0
-        for index, ((_, chunk), scored) in enumerate(zip(sequences, scored_counts)):
-            logprobs = engine.reference_logprobs(model, chunk)
+        for index, (full_ids, scored) in enumerate(zip(token_ids, scored_counts)):
+            logprobs = engine.reference_logprobs(model, full_ids)
             reference_sum += sum(logprobs[-scored:])
             reference_count += scored
             print(f"  window {index+1}/{len(sequences)}", end="\r", flush=True)

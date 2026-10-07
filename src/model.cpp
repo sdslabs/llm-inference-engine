@@ -10,12 +10,12 @@ static bf16* slotCache(bf16* kv_cache, int slot) {
 static bf16* layerK(bf16* slot_cache, int layer) {
   return slot_cache + (size_t)2 * layer * MAX_SEQ_LEN * KV_DIM;
 }
+
 static bf16* layerV(bf16* slot_cache, int layer) {
   return layerK(slot_cache, layer) + (size_t)MAX_SEQ_LEN * KV_DIM;
 }
 
 static std::mt19937_64 rng;
-
 void seedSampler(unsigned long long seed) {
   rng.seed(seed);
 }
@@ -33,17 +33,23 @@ static void sampleTokens(const bf16* logits, int* gpu_sampled_tokens, float* gpu
   cudaMemcpy(tokens.data(), gpu_sampled_tokens, num_rows*sizeof(int), cudaMemcpyDeviceToHost);
 }
 
+static std::vector<int> stop_token_ids = {END_OF_TEXT_TOKEN_ID, EOT_ID_TOKEN_ID};
+
+void setStopTokens(const std::vector<int>& ids) {
+  if(!ids.empty()) stop_token_ids = ids;
+}
+
+bool isStopToken(int token) {
+  for(int id : stop_token_ids) if(token == id) return true;
+  return false;
+}
+
 const char* finishReason(const SlotState& s, int max_new_tokens) {
+  if(s.stopped) return "stop";
   if(s.generated.empty()) return nullptr;
-  int t = s.generated.back();
-  if(t == END_OF_TEXT_TOKEN_ID || t == EOT_ID_TOKEN_ID) return "stop";
   if((int)s.generated.size() >= max_new_tokens) return "length";
   if(s.seq_len >= MAX_SEQ_LEN) return "context";
   return nullptr;
-}
-
-bool isFinished(const SlotState& s, int max_new_tokens) {
-  return finishReason(s, max_new_tokens) != nullptr;
 }
 
 // Y[T, OUT] = X[T, IN] @ W[OUT, IN]^T, all row major
@@ -56,11 +62,6 @@ static void linear(cublasHandle_t h, const bf16* X, const bf16* W, bf16* Y,
                        X, CUDA_R_16BF, IN,
                &beta,  Y, CUDA_R_16BF, OUT,
                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-}
-
-void projectLogits(cublasHandle_t cublas_handle, const bf16* hidden, Weights& weights,
-                   bf16* logits, int rows) {
-  linear(cublas_handle, hidden, weights.embed_tokens, logits, rows, E_DIM, VOCAB_SIZE);
 }
 
 // embedding -> N_LAYERS -> final rmsNorm. leaves the normalized hidden states
@@ -102,29 +103,39 @@ void forwardPrefill(const std::vector<int>& prompt, int prompt_len, int slot,
     const float scale = 1.0f / SQRT_HEAD_DIM;
     const float zero = 0.0f, one = 1.0f;
 
-    for(int h=0; h<NUM_Q_HEADS; h++) {
-      const bf16* Qh = q_proj + h*HEAD_DIM;
-      const bf16* Kh = k_proj + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
-      bf16* Sh = attn_scores + h*prompt_len*prompt_len;
-      cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, prompt_len, prompt_len,
-                   HEAD_DIM, &scale, Kh, CUDA_R_16BF, KV_DIM, Qh, CUDA_R_16BF, E_DIM,
-                   &zero, Sh, CUDA_R_16BF, prompt_len, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    for (int g = 0; g < NUM_K_HEADS; g++) {
+      const bf16* Kg = k_proj + (size_t)g*HEAD_DIM;
+      const bf16* Qg = q_proj + (size_t)g*GQA_Q_TO_K_RATIO*HEAD_DIM;
+      bf16* Sg = attn_scores + (size_t)g*GQA_Q_TO_K_RATIO*prompt_len*prompt_len;
+
+      cublasGemmStridedBatchedEx(
+          cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+          prompt_len, prompt_len, HEAD_DIM,
+          &scale,
+          Kg, CUDA_R_16BF, KV_DIM,     0,
+          Qg, CUDA_R_16BF, E_DIM,      (long long)HEAD_DIM,
+          &zero,
+          Sg, CUDA_R_16BF, prompt_len, (long long)prompt_len*prompt_len,
+          GQA_Q_TO_K_RATIO, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     }
 
     causalMask(attn_scores, prompt_len);
     softmax(attn_scores, prompt_len);
 
-    for (int h = 0; h < NUM_Q_HEADS; ++h) {
-      const bf16* Vh = v_proj + (h/GQA_Q_TO_K_RATIO)*HEAD_DIM;
-      const bf16* Sh = attn_scores + h*prompt_len*prompt_len;
-      bf16* Oh = attn_out + h*HEAD_DIM;
+    for (int g = 0; g < NUM_K_HEADS; g++) {
+      const bf16* Vg = v_proj + (size_t)g*HEAD_DIM;
+      const bf16* Sg = attn_scores + (size_t)g*GQA_Q_TO_K_RATIO*prompt_len*prompt_len;
+      bf16* Og = attn_out + (size_t)g*GQA_Q_TO_K_RATIO*HEAD_DIM;
 
-      cublasGemmEx(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-               HEAD_DIM, prompt_len, prompt_len,
-               &one,  Vh, CUDA_R_16BF, KV_DIM,
-                      Sh, CUDA_R_16BF, prompt_len,
-               &zero, Oh, CUDA_R_16BF, E_DIM,
-               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+      cublasGemmStridedBatchedEx(
+          cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+          HEAD_DIM, prompt_len, prompt_len,
+          &one,
+          Vg, CUDA_R_16BF, KV_DIM,     0,
+          Sg, CUDA_R_16BF, prompt_len, (long long)prompt_len*prompt_len,
+          &zero,
+          Og, CUDA_R_16BF, E_DIM,      (long long)HEAD_DIM,
+          GQA_Q_TO_K_RATIO, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     }
 
     linear(cublas_handle, attn_out, weights.w_o[layer], o_proj, prompt_len, E_DIM, E_DIM);
@@ -156,7 +167,6 @@ void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& c
 
   forwardPrefill(prompt, prompt_len, slot, weights, cublas_handle, buf);
 
-  // generation only needs the distribution after the last prompt token
   bf16* last = buf.rms_norms + (prompt_len-1)*E_DIM;
   linear(cublas_handle, last, weights.embed_tokens, buf.logits, 1, E_DIM, VOCAB_SIZE);
 
@@ -164,10 +174,12 @@ void prefill(std::vector<int>& prompt, int prompt_len, int slot, const Config& c
   sampleTokens(buf.logits, buf.gpu_sampled_tokens, buf.gpu_rand, 1, cfg.top_k, cfg.temperature, sampled);
 
   slots[slot].active = true;
+  slots[slot].stopped = isStopToken(sampled[0]);
+  slots[slot].prompt_len = prompt_len;
   slots[slot].seq_len = prompt_len;
   slots[slot].last_token = sampled[0];
   slots[slot].generated.clear();
-  slots[slot].generated.push_back(sampled[0]);
+  if(!slots[slot].stopped) slots[slot].generated.push_back(sampled[0]);
 }
 
 void decode(std::vector<SlotState>& slots, const Config& cfg,
@@ -188,8 +200,7 @@ void decode(std::vector<SlotState>& slots, const Config& cfg,
   bf16* down = buf.down;
   bf16* logits = buf.logits;
 
-  // pack the active slots into dense batch rows. active[b] is the slot that row b belongs to
-  std::vector<int> active;
+  std::vector<int> active; // active[b] is the slot that row b belongs to
   std::vector<int> batch_tokens;
   std::vector<int> batch_positions;
   for(int s=0; s<MAX_SEQUENCES; s++) {
@@ -227,9 +238,6 @@ void decode(std::vector<SlotState>& slots, const Config& cfg,
       KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
     }
 
-    // GQA_Q_TO_K_RATIO query heads share one K/V head, so each group is a
-    // single GEMM over that group and the NUM_K_HEADS groups sit at constant
-    // strides. One batched call replaces NUM_Q_HEADS separate GEMVs.
     for(int b=0; b<B; b++) {
       int len = batch_positions[b] + 1;
       bf16* Sc = slotCache(kv_cache, active[b]);
@@ -281,6 +289,10 @@ void decode(std::vector<SlotState>& slots, const Config& cfg,
 
   for(int b=0; b<B; b++) {
     int s = active[b];
+    if(isStopToken(sampled[b])) {
+      slots[s].stopped = true;
+      continue;
+    }
     slots[s].seq_len += 1;
     slots[s].last_token = sampled[b];
     slots[s].generated.push_back(sampled[b]);

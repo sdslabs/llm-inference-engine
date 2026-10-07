@@ -24,22 +24,59 @@ def percentiles(values, points=(50, 90, 99)):
     return {f"p{p}": float(np.percentile(array, p)) for p in points}
 
 
-def synthetic_prompt(length, rng):
-    """Random in-vocabulary tokens. Content is irrelevant to timing."""
-    return [engine.BOS_TOKEN] + [rng.randint(1000, 120000) for _ in range(length - 1)]
+WORDS = (
+    "time year people way day man thing woman life child world school state family "
+    "student group country problem hand part place case week company system program "
+    "question work government number night point home water room mother area money "
+    "story fact month lot right study book eye job word business issue side kind head "
+    "house service friend father power hour game line end member law car city community "
+    "name president team minute idea body information parent face level office door "
+    "health person art war history party result change morning reason research girl "
+    "moment air teacher force education season player market report street while"
+).split()
+
+
+def text_of_token_length(target, rng):
+    """Text that encodes to exactly `target` tokens, BOS included.
+
+    The engine tokenizes prompts itself now, so a benchmark prompt has to be
+    real text. Content is still irrelevant to timing, only the token count is.
+    """
+    if target < 2:
+        return None
+
+    words = [rng.choice(WORDS) for _ in range(target)]
+    for _ in range(60):
+        text = " ".join(words)
+        length = len(engine.encode(text))
+        if length == target:
+            return text
+        if length < target:
+            words.extend(rng.choice(WORDS) for _ in range(target - length))
+        else:
+            trim = min(length - target, len(words) - 1)
+            words = words[:len(words) - trim]
+    return None
 
 
 def run_config(batch, prompt_len, new_tokens, reps, rng):
     ttfts, tpots, e2es, itls = [], [], [], []
     wall_ms = []
+    prompt_tokens = []
     generated_total = 0
     device = None
     weights_bytes = engine.MODEL.stat().st_size
     kv_bytes_per_token = None
 
     for _ in range(reps):
-        prompts = [(f"r{i}", synthetic_prompt(prompt_len, rng)) for i in range(batch)]
-        records = engine.run(prompts=prompts, greedy=True, max_new_tokens=new_tokens, seed=0)
+        prompts = []
+        for i in range(batch):
+            text = text_of_token_length(prompt_len, rng)
+            if text is None:
+                sys.exit(f"could not build a prompt of exactly {prompt_len} tokens")
+            prompts.append((f"r{i}", text))
+
+        records = engine.run(prompts, greedy=True, max_new_tokens=new_tokens, seed=0)
 
         requests = engine.of_type(records, "request")
         run = engine.run_record(records)
@@ -49,6 +86,7 @@ def run_config(batch, prompt_len, new_tokens, reps, rng):
         generated_total += run["generated_tokens"]
 
         for request in requests:
+            prompt_tokens.append(request["prompt_tokens"])
             ttfts.append(request["ttft_ms"])
             e2es.append(request["e2e_ms"])
             if request["tpot_ms"] > 0:
@@ -62,7 +100,8 @@ def run_config(batch, prompt_len, new_tokens, reps, rng):
     # decode is memory bound. every step streams all weights once plus the live
     # KV for each sequence in the batch
     peak_bw = device["peak_bandwidth_bytes_per_sec"]
-    mean_seq_len = prompt_len + new_tokens / 2
+    mean_prompt_tokens = statistics.mean(prompt_tokens) if prompt_tokens else prompt_len
+    mean_seq_len = mean_prompt_tokens + new_tokens / 2
     step_bytes = weights_bytes + batch * mean_seq_len * kv_bytes_per_token
     median_step_s = statistics.median(itls) / 1000.0 if itls else 0.0
     mbu = step_bytes / (median_step_s * peak_bw) if median_step_s > 0 else 0.0
@@ -71,6 +110,7 @@ def run_config(batch, prompt_len, new_tokens, reps, rng):
     return {
         "batch": batch,
         "prompt_len": prompt_len,
+        "mean_prompt_tokens": mean_prompt_tokens,
         "new_tokens": new_tokens,
         "reps": reps,
         "ttft_ms": percentiles(ttfts),

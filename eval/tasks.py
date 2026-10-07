@@ -63,9 +63,20 @@ def load_items(task, limit):
     return items
 
 
+def common_prefix_len(a, b):
+    n = 0
+    while n < len(a) and n < len(b) and a[n] == b[n]:
+        n += 1
+    return n
+
+
 def build_sequences(items):
-    """One sequence per (question, choice). Records where the continuation starts
-    so its logprobs can be sliced out of the full sequence score."""
+    """One sequence per (question, choice), sent as context+choice text.
+
+    The engine tokenizes the joined string, so the continuation boundary is
+    taken from that tokenization rather than assumed to be len(context tokens):
+    BPE can merge across the join, and the merged token belongs to the choice.
+    """
     sequences = []
     meta = []
     skipped = 0
@@ -74,16 +85,22 @@ def build_sequences(items):
         context_ids = engine.encode(item["context"])
         entries = []
         for c, choice in enumerate(item["choices"]):
-            choice_ids = engine.tokenizer().encode(choice, add_special_tokens=False)
-            tokens = context_ids + choice_ids
-            if len(tokens) > engine.MAX_PROMPT_LEN or not choice_ids:
+            text = item["context"] + choice
+            full_ids = engine.encode(text)
+            context_len = common_prefix_len(context_ids, full_ids)
+
+            if (len(full_ids) > engine.MAX_PROMPT_LEN
+                    or context_len < 1
+                    or context_len >= len(full_ids)):
                 entries = None
                 break
+
             ident = f"q{q}c{c}"
-            sequences.append((ident, tokens))
+            sequences.append((ident, text))
             entries.append({"id": ident,
-                            "context_len": len(context_ids),
-                            "choice_len": len(choice_ids)})
+                            "context_len": context_len,
+                            "num_tokens": len(full_ids),
+                            "choice_len": len(full_ids) - context_len})
         if entries is None:
             skipped += 1
             meta.append(None)
@@ -123,6 +140,10 @@ def main():
             record = results.get(entry["id"])
             if record is None:
                 sys.exit(f"engine returned no score for {entry['id']}")
+            if record["num_tokens"] != entry["num_tokens"]:
+                sys.exit(f"{entry['id']}: engine tokenized to {record['num_tokens']} "
+                         f"tokens, harness to {entry['num_tokens']}. Tokenizer mismatch, "
+                         f"the continuation slice would be wrong")
             # logprobs[i] is for token i+1, so the continuation starts at
             # index context_len - 1
             choice_lp = record["logprobs"][entry["context_len"] - 1:]

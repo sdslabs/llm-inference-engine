@@ -7,10 +7,19 @@ Run everything from the repo root. `engine.py` is a shared client, not a script.
 ## Setup
 
 ```bash
-./build.sh                                   # produces build/engine
+git submodule update --init --recursive
+cd external/tokenizers-cpp && cmake -B build . && cmake --build build -j   # needs a Rust toolchain
+cd ../.. && ./build.sh                                                     # produces build/engine
+
 python/venv/bin/pip install datasets         # for perplexity --dataset and tasks
 python/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+python/venv/bin/hf download meta-llama/Llama-3.2-1B \
+  --local-dir python/models/llama-3.2-1b     # gated, needs `hf auth login`
 ```
+
+`build.sh` does not build the submodule, it only links against
+`external/tokenizers-cpp/build/libtokenizers_{c,cpp}.a`.
 
 `python/models/llama-3.2-1b/` must hold `model.safetensors`, `config.json` and
 `tokenizer.json`. The engine reads the safetensors directly, the reference loads
@@ -114,7 +123,7 @@ RTX 4050 Laptop (6 GB, 192 GB/s), Llama-3.2-1B bf16.
 |---|---|
 | Perplexity delta vs reference | +0.10% (17.9934 vs 17.9761) |
 | Logprob correlation | r >= 0.99992, 8/8 sequences pass |
-| Greedy exact match, 20 tokens | 7/8, mean first divergence 19.1 |
+| Greedy exact match, `--max-new-tokens 20` | 6/8, mean first divergence 17.9 |
 | WikiText-2 perplexity | 17.92 (512-token non-overlapping windows) |
 | HellaSwag acc_norm | 44.67% (300 questions) |
 | ARC-Easy acc | 65.67% (300 questions) |
@@ -123,8 +132,21 @@ RTX 4050 Laptop (6 GB, 192 GB/s), Llama-3.2-1B bf16.
 
 ## Limits
 
-- `MAX_PROMPT_LEN` 512, `MAX_SEQUENCES` 4, `MAX_SEQ_LEN` 2048, all compile time
-  in `src/kernels.cuh`. The scripts validate against them and error early.
+- `MAX_PROMPT_LEN` 512, `MAX_SEQUENCES` 4, `MAX_SEQ_LEN` 1024, all compile time.
+  Set them in `.env` and rebuild; `src/kernels.cuh` only holds `#ifndef`
+  fallbacks that `build.sh` overrides. The scripts read the same `.env` and
+  error early, so editing it without rebuilding makes the two sides disagree.
+- `MAX_SEQ_LEN` cannot exceed `MAX_NUM_THREAD`, because the softmax reductions
+  use one block per row.
+- The engine tokenizes prompts itself now, so the harness sends text, not token
+  ids. Prompts go one per line with `\n` escaped; `engine.escape_line` does the
+  packing. Each suite cross checks the engine's token count against its own and
+  fails on a mismatch, which is what catches tokenizer drift.
+- `tasks.py` takes the continuation boundary from the tokenization of
+  `context + choice`, not from `len(encode(context))`, since BPE can merge
+  across the join.
+- `perplexity.py` drops any window whose text does not re-tokenize to the ids it
+  came from, and reports how many. Zero on WikiText-2 in practice.
 - `arrival_ms` is always 0. Correct for offline batch; timed arrivals would need
   a load generator.
 - `test_logits.py` compares log P at the observed token, not the full 128k

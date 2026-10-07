@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--json", help="write full results here")
     args = parser.parse_args()
 
-    sequences = [(f"p{i}", engine.encode(text)) for i, text in enumerate(PROMPTS)]
+    sequences = [(f"p{i}", text) for i, text in enumerate(PROMPTS)]
 
     print(f"scoring {len(sequences)} sequences through the engine...")
     engine_results = engine.score(sequences)
@@ -68,10 +68,17 @@ def main():
 
     rows = []
     failures = 0
-    for ident, tokens in sequences:
+    for ident, text in sequences:
         record = engine_results.get(ident)
         if record is None:
             print(f"  {ident}: MISSING from engine output")
+            failures += 1
+            continue
+
+        tokens = engine.encode(text)
+        if record["num_tokens"] != len(tokens):
+            print(f"  FAIL {ident}: engine tokenized to {record['num_tokens']} tokens, "
+                  f"harness to {len(tokens)}. Tokenizer mismatch, logprobs are not comparable")
             failures += 1
             continue
 

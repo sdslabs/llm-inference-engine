@@ -5,6 +5,6 @@
 #include <vector>
 #include "runtime.h"
 
-void scoreSequence(const std::vector<int>& tokens, const std::string& id,
-                   Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
-                   std::ostream& out);
+int scoreSequence(const std::vector<int>& tokens, const std::string& id,
+                  Weights& weights, cublasHandle_t cublas_handle, Buffers& buf,
+                  std::ostream& out);

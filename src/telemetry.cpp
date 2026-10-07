@@ -27,14 +27,16 @@ void Recorder::onDecodeStep(const std::vector<SlotState>& slots) {
   double now = nowMs();
 
   for(int s=0; s<MAX_SEQUENCES; s++) {
-    if(slots[s].active) timing[s].token_times_ms.push_back(now);
+    if(!slots[s].active) continue;
+    SlotTiming& t = timing[s];
+    if(t.token_times_ms.size() < slots[s].generated.size()) t.token_times_ms.push_back(now);
   }
 }
 
 void Recorder::onFinish(int slot, const SlotState& slot_state, const char* reason,
                         const std::string& text) {
   const SlotTiming& t = timing[slot];
-  double e2e = t.token_times_ms.empty() ? 0.0 : t.token_times_ms.back();
+  double e2e = t.token_times_ms.empty() ? t.ttft_ms : t.token_times_ms.back();
   int decode_steps = (int)slot_state.generated.size() - 1;
 
   json record;
@@ -42,7 +44,7 @@ void Recorder::onFinish(int slot, const SlotState& slot_state, const char* reaso
   record["id"] = slot_state.id;
   record["slot"] = slot;
   record["prompt"] = slot_state.prompt_text;
-  record["prompt_tokens"] = slot_state.seq_len - (int)slot_state.generated.size() + 1;
+  record["prompt_tokens"] = slot_state.prompt_len;
   record["generated_tokens"] = (int)slot_state.generated.size();
   record["tokens"] = slot_state.generated;
   record["text"] = text;
@@ -58,6 +60,11 @@ void Recorder::onFinish(int slot, const SlotState& slot_state, const char* reaso
 
   completed++;
   generated_tokens += (long long)slot_state.generated.size();
+}
+
+void Recorder::onScore(int num_scored) {
+  completed++;
+  scored_tokens += (long long)num_scored;
 }
 
 void Recorder::writeRun(const Config& cfg, int num_requests) {
@@ -89,15 +96,19 @@ void Recorder::writeRun(const Config& cfg, int num_requests) {
   record["mode"] = cfg.score_mode ? "score" : "generate";
   record["model"] = cfg.model_path.string();
   record["device"] = device;
-  record["seed"] = cfg.seed;
-  record["greedy"] = cfg.greedy;
-  record["top_k"] = cfg.top_k;
-  record["temperature"] = cfg.temperature;
-  record["max_new_tokens"] = cfg.max_new_tokens;
   record["max_sequences"] = MAX_SEQUENCES;
   record["num_requests"] = num_requests;
   record["completed_requests"] = completed;
-  record["generated_tokens"] = generated_tokens;
+  if(cfg.score_mode) {
+    record["scored_tokens"] = scored_tokens;
+  } else {
+    record["seed"] = cfg.seed;
+    record["greedy"] = cfg.greedy;
+    record["top_k"] = cfg.top_k;
+    record["temperature"] = cfg.temperature;
+    record["max_new_tokens"] = cfg.max_new_tokens;
+    record["generated_tokens"] = generated_tokens;
+  }
   record["wall_ms"] = wall;
   record["kv_bytes_per_token"] = (uint64_t)N_LAYERS * 2 * KV_DIM * sizeof(bf16);
   record["gpu_used_bytes"] = (uint64_t)(total_mem - free_mem);

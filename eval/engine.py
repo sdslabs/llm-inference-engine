@@ -54,8 +54,9 @@ HF_MODEL = _setting("HF_MODEL") or str(MODEL_DIR)
 
 MAX_PROMPT_LEN = int(_setting("MAX_PROMPT_LEN", 512))
 MAX_SEQUENCES = int(_setting("MAX_SEQUENCES", 4))
-MAX_SEQ_LEN = int(_setting("MAX_SEQ_LEN", 2048))
+MAX_SEQ_LEN = int(_setting("MAX_SEQ_LEN", 1024))
 BOS_TOKEN = 128000
+STOP_TOKENS = (128001, 128009)
 
 _tokenizer = None
 _tokenizer_json = None
@@ -116,34 +117,64 @@ def _flags_to_argv(flags: dict) -> list[str]:
     return argv
 
 
-def run(prompt_text: str = None, prompts: list = None, timeout: int = 3600, **flags) -> list[dict]:
+def escape_line(text: str) -> str:
+    """Pack a prompt onto one line the way the engine's loadPrompts unescapes it."""
+    out = []
+    for char in text:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def run(prompts: list, timeout: int = 3600, **flags) -> list[dict]:
     """Invoke the engine once and return its parsed JSONL records.
 
-    Pass either prompt_text (positional prompt) or prompts (list of token id
-    lists, or list of (id, token ids) pairs) which becomes a --prompts file.
+    prompts is a list of prompt strings, or of (id, prompt string) pairs. They
+    are written one per line to a temp text file which the engine tokenizes
+    itself. The engine labels records by line index; ids given here are mapped
+    back onto the returned records.
+
     Remaining keyword args become flags: greedy=True -> --greedy,
     max_new_tokens=8 -> --max-new-tokens 8.
     """
     check_paths()
 
-    cmd = [str(ENGINE), str(MODEL), str(tokenizer_json())]
-    if prompt_text is not None:
-        cmd.append(prompt_text)
+    entries = []
+    for index, entry in enumerate(prompts):
+        ident, text = entry if isinstance(entry, tuple) else (str(index), entry)
+        if not isinstance(text, str):
+            raise EngineError(
+                f"prompt {ident} is {type(text).__name__}, the engine takes text now")
+        if not text.strip():
+            raise EngineError(
+                f"prompt {ident} is blank; the engine skips blank lines, which would "
+                f"shift every later line index")
+        length = len(encode(text))
+        if length > MAX_PROMPT_LEN:
+            raise EngineError(
+                f"prompt {ident} encodes to {length} tokens, "
+                f"engine MAX_PROMPT_LEN is {MAX_PROMPT_LEN}")
+        entries.append((str(ident), text))
+
+    if not entries:
+        raise EngineError("no prompts given")
 
     tmp_path = None
     try:
-        if prompts is not None:
-            fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="eval-prompts-")
-            with os.fdopen(fd, "w") as handle:
-                for index, entry in enumerate(prompts):
-                    ident, tokens = entry if isinstance(entry, tuple) else (str(index), entry)
-                    if len(tokens) > MAX_PROMPT_LEN:
-                        raise EngineError(
-                            f"sequence {ident} has {len(tokens)} tokens, "
-                            f"engine MAX_PROMPT_LEN is {MAX_PROMPT_LEN}")
-                    handle.write(json.dumps({"id": str(ident), "tokens": list(tokens)}) + "\n")
-            cmd += ["--prompts", tmp_path]
+        fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="eval-prompts-")
+        with os.fdopen(fd, "w") as handle:
+            for _, text in entries:
+                handle.write(escape_line(text) + "\n")
 
+        cmd = [str(ENGINE), str(MODEL), str(tokenizer_json()), tmp_path]
         cmd += _flags_to_argv(flags)
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -160,6 +191,19 @@ def run(prompt_text: str = None, prompts: list = None, timeout: int = 3600, **fl
                 records.append(json.loads(line))
             except json.JSONDecodeError as exc:
                 raise EngineError(f"non-JSON line on stdout: {line[:200]}") from exc
+
+        idents = [ident for ident, _ in entries]
+        for record in records:
+            if record.get("type") not in ("request", "score"):
+                continue
+            try:
+                position = int(record["id"])
+            except (KeyError, ValueError) as exc:
+                raise EngineError(f"engine record has no line index id: {record}") from exc
+            if not 0 <= position < len(idents):
+                raise EngineError(
+                    f"engine reported line index {position} for {len(idents)} prompts")
+            record["id"] = idents[position]
         return records
     finally:
         if tmp_path:
@@ -177,14 +221,14 @@ def run_record(records: list[dict]) -> dict:
     return runs[0]
 
 
-def generate(prompt_text: str = None, prompts: list = None, **flags) -> list[dict]:
+def generate(prompts: list, **flags) -> list[dict]:
     """Generate and return the request records only."""
-    return of_type(run(prompt_text, prompts, **flags), "request")
+    return of_type(run(prompts, **flags), "request")
 
 
 def score(prompts: list, **flags) -> dict:
     """Score sequences, returning {id: record}."""
-    records = of_type(run(prompts=prompts, score=True, **flags), "score")
+    records = of_type(run(prompts, score=True, **flags), "score")
     return {r["id"]: r for r in records}
 
 

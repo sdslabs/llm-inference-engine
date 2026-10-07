@@ -31,8 +31,9 @@ constexpr int GQA_Q_TO_K_RATIO = 4;            // query head index / this = its 
 #ifndef ENGINE_MAX_PROMPT_LEN
 #define ENGINE_MAX_PROMPT_LEN 512
 #endif
+
 #ifndef ENGINE_MAX_SEQ_LEN
-#define ENGINE_MAX_SEQ_LEN 2048
+#define ENGINE_MAX_SEQ_LEN 1024
 #endif
 #ifndef ENGINE_MAX_NUM_THREAD
 #define ENGINE_MAX_NUM_THREAD 1024
@@ -44,11 +45,12 @@ constexpr int GQA_Q_TO_K_RATIO = 4;            // query head index / this = its 
 #define ENGINE_DEFAULT_TEMPERATURE 0.8f
 #endif
 #ifndef ENGINE_DEFAULT_MAX_NEW_TOKENS
-#define ENGINE_DEFAULT_MAX_NEW_TOKENS 20
+#define ENGINE_DEFAULT_MAX_NEW_TOKENS 512
 #endif
 
 // sampling defaults, overridable per run from the command line
 constexpr int MAX_NEW_TOKENS_GENERATED = ENGINE_DEFAULT_MAX_NEW_TOKENS;
+constexpr int BOS_TOKEN_ID = 128000;         // <|begin_of_text|>, prepended to every prompt
 constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>, stops decode
 constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>, stops decode
 constexpr int TOP_K = ENGINE_DEFAULT_TOP_K;          // also sizes shared memory in topKSample
@@ -69,6 +71,7 @@ inline float *d_sin_table = nullptr; // [max_seq_len, head_dim]
 // prefill
 void embeddingGather(int* gpu_input_tokens, __nv_bfloat16* gpu_input_embeds, __nv_bfloat16* embed_tokens, int num_input_tokens);
 void rmsNorm(bf16* input, bf16* output, bf16* norm_weights, int num_tokens);
+void setRmsNormEps(float eps);
 void silu(bf16* a, bf16* b, int num_tokens);
 void residualAdd(bf16* input, bf16* residual, int num_tokens);
 void softmax(bf16* input, int num_tokens);
