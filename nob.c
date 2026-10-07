@@ -3,16 +3,38 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char* env_or_default(const char* key, const char* def) {
-    const char* val = getenv(key);
-    return (val && val[0] != '\0') ? val : def;
+static const char* REQUIRED_KEYS[] = {
+    "ARCH",
+    "MAX_SEQUENCES",
+    "MAX_PROMPT_LEN",
+    "MAX_SEQ_LEN",
+    "MAX_NUM_THREAD",
+    "MAX_TOP_K",
+    "DEFAULT_TOP_K",
+    "DEFAULT_TEMPERATURE",
+    "DEFAULT_MAX_NEW_TOKENS",
+};
+
+int check_required_env(void) {
+    int missing = 0;
+    for(size_t i = 0; i < NOB_ARRAY_LEN(REQUIRED_KEYS); i++) {
+        const char* val = getenv(REQUIRED_KEYS[i]);
+        if(!val || val[0] == '\0') {
+            nob_log(NOB_ERROR, "%s is not set", REQUIRED_KEYS[i]);
+            missing++;
+        }
+    }
+    return missing;
 }
 
-void load_dotenv(void) {
-    if(!nob_file_exists(".env")) return;
+int load_dotenv(void) {
+    if(!nob_file_exists(".env")) {
+        nob_log(NOB_ERROR, ".env not found; it is the only source for the build limits");
+        return 0;
+    }
 
     Nob_String_Builder sb = {0};
-    if(!nob_read_entire_file(".env", &sb)) return;
+    if(!nob_read_entire_file(".env", &sb)) return 0;
 
     Nob_String_View content = {.count=sb.count, .data = sb.items};
 
@@ -38,6 +60,7 @@ void load_dotenv(void) {
     }
 
     nob_sb_free(sb);
+    return 1;
 }
 
 const char* resolve_cuda_path(void) {
@@ -52,13 +75,14 @@ const char* resolve_cuda_path(void) {
 }
 
 void append_limits(Nob_Cmd* cmd) {
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQUENCES=%s", env_or_default("MAX_SEQUENCES", "4")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_PROMPT_LEN=%s", env_or_default("MAX_PROMPT_LEN", "512")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQ_LEN=%s", env_or_default("MAX_SEQ_LEN", "2048")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_NUM_THREAD=%s", env_or_default("MAX_NUM_THREAD", "1024")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_TOP_K=%s", env_or_default("DEFAULT_TOP_K", "40")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_TEMPERATURE=%sf", env_or_default("DEFAULT_TEMPERATURE", "0.8")));
-    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_MAX_NEW_TOKENS=%s", env_or_default("DEFAULT_MAX_NEW_TOKENS", "20")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQUENCES=%s", getenv("MAX_SEQUENCES")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_PROMPT_LEN=%s", getenv("MAX_PROMPT_LEN")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQ_LEN=%s", getenv("MAX_SEQ_LEN")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_NUM_THREAD=%s", getenv("MAX_NUM_THREAD")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_TOP_K=%s", getenv("MAX_TOP_K")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_TOP_K=%s", getenv("DEFAULT_TOP_K")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_TEMPERATURE=%sf", getenv("DEFAULT_TEMPERATURE")));
+    nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_DEFAULT_MAX_NEW_TOKENS=%s", getenv("DEFAULT_MAX_NEW_TOKENS")));
 }
 
 int main(int argc, char** argv) {
@@ -72,14 +96,18 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    load_dotenv();
+    if(!load_dotenv()) return 1;
+    if(check_required_env() > 0) {
+        nob_log(NOB_ERROR, "define the missing keys in .env, or export them to override");
+        return 1;
+    }
 
     const char* cuda_path = resolve_cuda_path();
     nob_log(NOB_INFO, "Using cuda path: %s", cuda_path);
 
     if(!nob_mkdir_if_not_exists("build")) return 1;
 
-    const char* arch = env_or_default("ARCH", "native");
+    const char* arch = getenv("ARCH");
     const char* tokenizer_dir = "external/tokenizers-cpp";
 
     // Compile CUDA kernals

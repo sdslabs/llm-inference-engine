@@ -2,8 +2,7 @@
 *.o
 test.sh
 /engine
-/python/venv/
-/python/models/
+/python
 /build
 /models/
 .env
