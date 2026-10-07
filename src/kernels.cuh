@@ -9,7 +9,7 @@ using bf16 = __nv_bfloat16;
 constexpr int B_TO_MB = 1024 * 1024;
 constexpr int B_TO_GB = 1024 * 1024 * 1024;
 
-// model architecture. TODO: hardcoded for Llama 3.2 1B, read from config later
+// model architecture. 
 constexpr int N_LAYERS = 16;
 constexpr int EMBEDDING_LENGTH = 2048;   // model dim, width of the residual stream
 constexpr int E_DIM = EMBEDDING_LENGTH;  // should be Even
@@ -24,8 +24,7 @@ constexpr int NUM_Q_HEADS = 32;
 constexpr int NUM_K_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;            // query head index / this = its K head index
 
-// .env is the only definition of these. nob passes them all as -D defines, so a
-// fallback here could only ever disagree with the build.
+// .env is the only definition of these. nob passes them all as -D defines
 #ifndef ENGINE_MAX_SEQUENCES
 #error "ENGINE_MAX_SEQUENCES not defined, build with ./nob"
 #endif
@@ -50,6 +49,8 @@ constexpr int GQA_Q_TO_K_RATIO = 4;            // query head index / this = its 
 #ifndef ENGINE_DEFAULT_MAX_NEW_TOKENS
 #error "ENGINE_DEFAULT_MAX_NEW_TOKENS not defined, build with ./nob"
 #endif
+
+constexpr int TOP_K = ENGINE_DEFAULT_TOP_K;
 
 constexpr int BOS_TOKEN_ID = 128000;         // <|begin_of_text|>, prepended to every prompt
 constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>, stops decode
