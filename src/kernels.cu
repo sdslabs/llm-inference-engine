@@ -353,8 +353,8 @@ __global__ void topKSampleKernel(const bf16* logits, int* sampled_tokens,
                                  const float* uniform_rand, int k, float temperature) {
   __shared__ float s_val[MAX_NUM_THREAD];
   __shared__ int   s_idx[MAX_NUM_THREAD];
-  __shared__ float s_top_val[TOP_K];
-  __shared__ int   s_top_idx[TOP_K];
+  __shared__ float s_top_val[MAX_TOP_K];
+  __shared__ int   s_top_idx[MAX_TOP_K];
 
   const bf16* row = logits + (size_t)blockIdx.x * VOCAB_SIZE;
   int tid = threadIdx.x;
@@ -421,7 +421,7 @@ __global__ void topKSampleKernel(const bf16* logits, int* sampled_tokens,
 
 void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_rand,
                 int num_rows, int k, float temperature) {
-  if(k > TOP_K) k = TOP_K;
+  if(k > MAX_TOP_K) k = MAX_TOP_K;
   if(k > VOCAB_SIZE) k = VOCAB_SIZE;
   if(k < 1 || temperature <= 0.0f) {
     k = 1;

@@ -10,7 +10,7 @@ static void usage(const char* prog) {
     << "  prompts.txt              one prompt per line, plain text. blank lines are skipped.\n"
     << "                           \\n \\r \\t \\\\ are unescaped, so a prompt can span lines\n\n"
     << "  --max-new-tokens <n>     default " << MAX_NEW_TOKENS_GENERATED << "\n"
-    << "  --top-k <n>              default " << TOP_K << "\n"
+    << "  --top-k <n>              default " << DEFAULT_TOP_K << ", max " << MAX_TOP_K << "\n"
     << "  --temperature <f>        default " << TEMPERATURE << "\n"
     << "  --greedy                 argmax sampling, same as --top-k 1\n"
     << "  --seed <n>               seed the sampler, default nondeterministic\n"
@@ -133,8 +133,8 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
     std::cerr << "--max-new-tokens must be at least 1\n";
     return ParseResult::Error;
   }
-  if(cfg.top_k < 1 || cfg.top_k > TOP_K) {
-    std::cerr << "--top-k must be between 1 and " << TOP_K << "\n";
+  if(cfg.top_k < 1 || cfg.top_k > MAX_TOP_K) {
+    std::cerr << "--top-k must be between 1 and " << MAX_TOP_K << "\n";
     return ParseResult::Error;
   }
   if(cfg.temperature <= 0.0f) {

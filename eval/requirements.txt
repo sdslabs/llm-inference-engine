@@ -1,0 +1,5 @@
+numpy>=2.0,<3
+huggingface-hub>=1.0,<2
+transformers>=5.0,<6
+datasets>=5.0,<6
+torch>=2.6,<3

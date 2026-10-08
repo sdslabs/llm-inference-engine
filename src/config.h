@@ -12,7 +12,7 @@ struct Config {
   std::vector<std::string> prompts;
 
   int max_new_tokens = MAX_NEW_TOKENS_GENERATED;
-  int top_k = TOP_K;
+  int top_k = DEFAULT_TOP_K;
   float temperature = TEMPERATURE;
   bool greedy = false;
 

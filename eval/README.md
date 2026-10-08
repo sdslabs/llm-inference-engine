@@ -9,16 +9,24 @@ Run everything from the repo root. `engine.py` is a shared client, not a script.
 ```bash
 git submodule update --init --recursive
 cd external/tokenizers-cpp && cmake -B build . && cmake --build build -j   # needs a Rust toolchain
-cd ../.. && ./build.sh                                                     # produces build/engine
+cd ../..
 
-python/venv/bin/pip install datasets         # for perplexity --dataset and tasks
+cc -o nob nob.c                              # once, nob rebuilds itself after this
+./nob                                        # produces build/engine
+
+python -m venv python/venv
 python/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+python/venv/bin/pip install -r eval/requirements.txt
 
 python/venv/bin/hf download meta-llama/Llama-3.2-1B \
   --local-dir python/models/llama-3.2-1b     # gated, needs `hf auth login`
 ```
 
-`build.sh` does not build the submodule, it only links against
+Install `torch` first and from the CPU index, otherwise the pin in
+`requirements.txt` pulls the much larger default CUDA build. The reference model
+runs on CPU in fp32 on purpose; the GPU belongs to the engine under test.
+
+`nob` does not build the submodule, it only links against
 `external/tokenizers-cpp/build/libtokenizers_{c,cpp}.a`.
 
 `python/models/llama-3.2-1b/` must hold `model.safetensors`, `config.json` and
@@ -117,27 +125,57 @@ python/venv/bin/python eval/tasks.py --task arc_challenge --limit 300 --json arc
 
 ## Current numbers
 
-RTX 4050 Laptop (6 GB, 192 GB/s), Llama-3.2-1B bf16.
+RTX 4050 Laptop (6 GB, 192 GB/s, 20 SMs), Llama-3.2-1B bf16, `MAX_SEQ_LEN` 1024.
+
+### Correctness
 
 | Measurement | Value |
 |---|---|
-| Perplexity delta vs reference | +0.10% (17.9934 vs 17.9761) |
-| Logprob correlation | r >= 0.99992, 8/8 sequences pass |
+| Perplexity delta vs reference | **+0.05%** (21.8045 vs 21.7941, 10 windows) |
+| WikiText-2 perplexity | 17.8847 (566 windows of 511, 288,510 scored positions) |
+| Logprob parity | 8/8 pass, min Pearson r 0.999917 |
+| Worst logprob diff | max abs 0.1405 (tol 0.25), mean abs 0.0274 (tol 0.06) |
 | Greedy exact match, `--max-new-tokens 20` | 6/8, mean first divergence 17.9 |
-| WikiText-2 perplexity | 17.92 (512-token non-overlapping windows) |
-| HellaSwag acc_norm | 44.67% (300 questions) |
 | ARC-Easy acc | 65.67% (300 questions) |
-| Throughput batch 1 / batch 4 | 53.8 / 186.2 tok/s |
-| MBU batch 1 / batch 4 | 86% / 80% |
+| HellaSwag acc_norm | 43.33% (300 questions) |
+
+### Speed
+
+`--new-tokens 64 --reps 3`. ITL is the inter-token latency of one decode step
+across the whole batch, so per-sequence throughput falls as batch grows while
+total throughput rises.
+
+| batch | prompt | TTFT p50 | TTFT p99 | ITL p50 | tok/s | MBU |
+|---|---|---|---|---|---|---|
+| 1 | 128 | 103.8 ms | 114.5 ms | 14.52 ms | 62.0 | 88.8% |
+| 1 | 512 | 153.0 ms | 153.5 ms | 14.74 ms | 58.8 | 88.0% |
+| 2 | 128 | 112.5 ms | 124.6 ms | 15.14 ms | 117.4 | 85.4% |
+| 2 | 512 | 187.0 ms | 224.7 ms | 15.46 ms | 105.9 | 84.4% |
+| 4 | 128 | 134.5 ms | 170.7 ms | 16.26 ms | 213.3 | 79.8% |
+| 4 | 512 | 254.9 ms | 358.6 ms | 16.36 ms | 182.1 | 80.9% |
+
+MBU falls as batch grows because the 2.47 GB weight read is amortised across
+more sequences while KV traffic scales with the batch, so the weight-dominated
+batch-1 step sits closest to the roofline.
+
+TTFT grows with batch size because prefill is still one request at a time: the
+last slot admitted waits behind every earlier prefill. That is the largest
+remaining structural cost, and the reason batch-4 p99 TTFT is ~2.6x p50.
 
 ## Limits
 
-- `MAX_PROMPT_LEN` 512, `MAX_SEQUENCES` 4, `MAX_SEQ_LEN` 1024, all compile time.
-  Set them in `.env` and rebuild; `src/kernels.cuh` only holds `#ifndef`
-  fallbacks that `build.sh` overrides. The scripts read the same `.env` and
-  error early, so editing it without rebuilding makes the two sides disagree.
-- `MAX_SEQ_LEN` cannot exceed `MAX_NUM_THREAD`, because the softmax reductions
-  use one block per row.
+- `MAX_PROMPT_LEN` 512, `MAX_SEQUENCES` 4, `MAX_SEQ_LEN` 1024, `MAX_TOP_K` 40,
+  all compile time. `.env` is the only definition: `nob` passes them as `-D`
+  defines and errors if one is unset, and `src/kernels.cuh` `#error`s rather
+  than carrying a fallback that could disagree with the build.
+- The relationships between those limits are `static_assert`ed in
+  `src/kernels.cuh`, so an unbuildable combination is a compile error rather
+  than a silent miscompile. `MAX_SEQ_LEN` and `MAX_PROMPT_LEN` cannot exceed
+  `MAX_NUM_THREAD` because the softmax reductions use one block per row, and
+  `MAX_PROMPT_LEN^2` must cover `MAX_SEQUENCES * MAX_SEQ_LEN` because
+  `attn_scores` is sized for prefill but reused by decode.
+- The scripts still read the same `.env` for these, so editing it without
+  rebuilding makes the harness and the binary disagree.
 - The engine tokenizes prompts itself now, so the harness sends text, not token
   ids. Prompts go one per line with `\n` escaped; `engine.escape_line` does the
   packing. Each suite cross checks the engine's token count against its own and
