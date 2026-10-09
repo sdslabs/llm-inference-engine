@@ -88,6 +88,15 @@ const char* resolve_hip_path(void) {
     return "/opt/rocm";
 }
 
+const char* resolve_gpu_compat_path(void) {
+    const char* header_path = getenv("GPU_COMPAT_PATH");
+    if (header_path && strlen(header_path) > 0) return header_path;
+    else {
+        nob_log(NOB_ERROR, "define the missing keys in .env, or export them to override");
+        return "";
+    }
+}
+
 void append_limits(Nob_Cmd* cmd) {
     nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQUENCES=%s", getenv("MAX_SEQUENCES")));
     nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_PROMPT_LEN=%s", getenv("MAX_PROMPT_LEN")));
@@ -117,16 +126,18 @@ int main(int argc, char** argv) {
     }
 
     // resolve path based on the micro architecture
-    const char* nvidia = "nvidia";
     const char* microarch = getenv("HARDWARE_MICROARCH");
     const char* compiler_path;
+
+    const char* gpu_compat = getenv("GPU_COMPAT_PATH");
+    if (!strcmp(gpu_compat, "")) return 1;
 
     if(!nob_mkdir_if_not_exists("build")) return 1;
 
     const char* arch = getenv("ARCH");
     const char* tokenizer_dir = "external/tokenizers-cpp";
 
-    if (microarch == nvidia)
+    if (!strcmp(microarch, "nvidia"))
     {
         compiler_path = resolve_cuda_path();
         nob_log(NOB_INFO, "Using cuda path: %s", compiler_path);
@@ -153,7 +164,7 @@ int main(int argc, char** argv) {
         Nob_Cmd hipcc = {0};
         nob_cmd_append(&hipcc, "hipcc", "-O3", "-x", "hip", nob_temp_sprintf("--offload_arch=%s", arch));
         append_limits(&hipcc);
-        nob_cmd_append(&hipcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+        nob_cmd_append(&hipcc, "-DUSE_ROCM", nob_temp_sprintf("-include%s", gpu_compat), "-c", "src/kernels.cu", "-o", "build/kernels.o");
 
         nob_log(NOB_INFO, "Compiling HIP Kernels for %s", arch);
         if(!nob_cmd_run_sync(hipcc)) return 1;
@@ -172,7 +183,14 @@ int main(int argc, char** argv) {
     );
 
     // Output
-    nob_cmd_append(&gpp, "-o", "build/engine");
+    if (strcmp(microarch, "nvidia"))
+    {
+        nob_cmd_append(&gpp, "-o", "build/cuda");
+    }
+    else
+    {
+        nob_cmd_append(&gpp, "-o", "build/hip");
+    }
 
     // Includes
     nob_cmd_append(&gpp, "-Isrc");
