@@ -116,22 +116,47 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* cuda_path = resolve_cuda_path();
-    nob_log(NOB_INFO, "Using cuda path: %s", cuda_path);
+    // resolve path based on the micro architecture
+    const char* nvidia = "nvidia";
+    const char* microarch = getenv("HARDWARE_MICROARCH");
 
     if(!nob_mkdir_if_not_exists("build")) return 1;
 
     const char* arch = getenv("ARCH");
     const char* tokenizer_dir = "external/tokenizers-cpp";
 
-    // Compile CUDA kernals
-    Nob_Cmd nvcc = {0};
-    nob_cmd_append(&nvcc, "nvcc", "-O3", nob_temp_sprintf("-arch=%s", arch));
-    append_limits(&nvcc);
-    nob_cmd_append(&nvcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+    if (microarch == nvidia)
+    {
+        const char* cuda_path = resolve_cuda_path();
+        nob_log(NOB_INFO, "Using cuda path: %s", cuda_path);
 
-    nob_log(NOB_INFO, "Compiling CUDA Kernels for %s ", arch);
-    if(!nob_cmd_run_sync(nvcc)) return 1;
+        if (!nob_mkdir_if_not_exists("build")) return 1;
+
+        // Compile CUDA kernels
+        Nob_Cmd nvcc = {0};
+        nob_cmd_append(&nvcc, "nvcc", "-O3", nob_temp_sprintf("-arch=%s", arch));
+        append_limits(&nvcc);
+        nob_cmd_append(&nvcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+
+        nob_log(NOB_INFO, "Compiling CUDA Kernels for %s ", arch);
+        if(!nob_cmd_run_sync(nvcc)) return 1;
+    }
+    else
+    {
+        const char* hip_path = resolve_hip_path();
+        nob_log(NOB_INFO, "Using hip path: %s", hip_path);
+
+        if (!nob_mkdir_if_not_exists("build")) return 1;
+
+        // Compile HIP kernels
+        Nob_Cmd hipcc = {0};
+        nob_cmd_append(&hipcc, "hipcc", "-O3", "-x", "hip", nob_temp_sprintf("--offload_arch=%s", arch));
+        append_limits(&hipcc);
+        nob_cmd_append(&hipcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+
+        nob_log(NOB_INFO, "Compiling HIP Kernels for %s", arch);
+        if(!nob_cmd_run_sync(hipcc)) return 1;
+    }
 
     // Compile Main Binary
     Nob_Cmd gpp = {0};
