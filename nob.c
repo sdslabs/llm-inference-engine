@@ -5,6 +5,7 @@
 
 static const char* REQUIRED_KEYS[] = {
     "ARCH",
+    "HARDWARE_MICROARCH",
     "MAX_SEQUENCES",
     "MAX_PROMPT_LEN",
     "MAX_SEQ_LEN",
@@ -72,6 +73,19 @@ const char* resolve_cuda_path(void) {
 
     // Fallback
     return "/usr/local/cuda";
+}
+
+const char* resolve_hip_path(void) {
+    const char* env_path = getenv("ROCM_PATH");
+    if(env_path && strlen(env_path) > 0) return env_path;
+    env_path = getenv("HIP_PATH");
+
+    if(env_path && strlen(env_path) > 0) return env_path;
+    if(nob_file_exists("/opt/rocm")) return "/opt/rocm";
+    if(nob_file_exists("/opt/rocm/hip/")) return "/opt/rocm/hip/";
+
+    // Fallback
+    return "/opt/rocm";
 }
 
 void append_limits(Nob_Cmd* cmd) {
