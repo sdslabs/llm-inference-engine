@@ -119,6 +119,7 @@ int main(int argc, char** argv) {
     // resolve path based on the micro architecture
     const char* nvidia = "nvidia";
     const char* microarch = getenv("HARDWARE_MICROARCH");
+    const char* compiler_path;
 
     if(!nob_mkdir_if_not_exists("build")) return 1;
 
@@ -127,8 +128,8 @@ int main(int argc, char** argv) {
 
     if (microarch == nvidia)
     {
-        const char* cuda_path = resolve_cuda_path();
-        nob_log(NOB_INFO, "Using cuda path: %s", cuda_path);
+        compiler_path = resolve_cuda_path();
+        nob_log(NOB_INFO, "Using cuda path: %s", compiler_path);
 
         if (!nob_mkdir_if_not_exists("build")) return 1;
 
@@ -143,8 +144,8 @@ int main(int argc, char** argv) {
     }
     else
     {
-        const char* hip_path = resolve_hip_path();
-        nob_log(NOB_INFO, "Using hip path: %s", hip_path);
+        compiler_path = resolve_hip_path();
+        nob_log(NOB_INFO, "Using hip path: %s", compiler_path);
 
         if (!nob_mkdir_if_not_exists("build")) return 1;
 
@@ -176,11 +177,11 @@ int main(int argc, char** argv) {
     // Includes
     nob_cmd_append(&gpp, "-Isrc");
     nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", tokenizer_dir));
-    nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", cuda_path));
+    nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", compiler_path));
 
     // Libraries
     nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/build", tokenizer_dir), "-ltokenizers_cpp", "-ltokenizers_c");
-    nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/lib64", cuda_path), "-lcudart", "-lcublas");
+    nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/lib64", compiler_path), "-lcudart", "-lcublas");
 
     nob_log(NOB_INFO, "Compiling Main Binary..");
     if(!nob_cmd_run_sync(gpp)) return 1;
