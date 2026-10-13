@@ -16,6 +16,10 @@
     #define cudaDeviceSynchronize    hipDeviceSynchronize
     #define cudaError_t              hipError_t
     #define cudaSuccess              hipSuccess
+    #define cudaGetDeviceProperties  hipGetDeviceProperties
+    #define cudaDeviceProp           hipDeviceProp
+    #define cudaMemGetInfo           hipGetMemInfo
+    #define cudaDeviceGetAttribute   hipDeviceGetAttribute
     #define cudaGetErrorString       hipGetErrorString
     #define cudaGetLastError         hipGetLastError
 
@@ -23,6 +27,13 @@
     #define cublasCreate             hipblasCreate
     #define cublasDestroy            hipblasDestroy
     #define cublasSgemm              hipblasSgemm
+    #define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
+    #define CUDA_R_16BF              HIP_R_16BF
+    #define CUBLAS_OP_T              HIPBLAS_OP_T
+    #define CUBLAS_OP_N              HIPBLAS_OP_N
+    #define CUBLAS_COMPUTE_32F       HIPBLAS_COMPUTE_32F
+    #define CUBLAS_GEMM_DEFAULT      HIPBLAS_GEMM_DEFAULT
+    #define CUDA HIP
 
     using bf16 = __hip_bfloat16;
 #else
