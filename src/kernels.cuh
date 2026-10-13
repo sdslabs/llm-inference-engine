@@ -69,6 +69,26 @@ constexpr int MAX_NEW_TOKENS_GENERATED = ENGINE_DEFAULT_MAX_NEW_TOKENS;
 constexpr int DEFAULT_TOP_K = ENGINE_DEFAULT_TOP_K;
 constexpr float TEMPERATURE = ENGINE_DEFAULT_TEMPERATURE;
 
+// Flash Attention
+constexpr int FA_BR = 32;         // query rows per block
+constexpr int FA_BC = 32;         // keys per tile, == warp size so one warp reduces one row
+constexpr int FA_THREADS = 256;   // 8 warps
+
+static_assert(FA_BC == 32,
+              "flashAttentionPrefill reduces one query row per warp, one key per lane");
+static_assert(FA_THREADS % 32 == 0 && FA_BR <= FA_THREADS,
+              "flashAttentionPrefill indexes threads as warp*32 + lane and initializes "
+              "the per row state with one thread per query row");
+static_assert((size_t)FA_BR*HEAD_DIM*sizeof(bf16)        // Qs
+            + (size_t)FA_BC*(HEAD_DIM+2)*sizeof(bf16)    // Ks, padded
+            + (size_t)FA_BC*HEAD_DIM*sizeof(bf16)        // Vs
+            + (size_t)FA_BR*FA_BC*sizeof(float)          // Ss
+            + (size_t)FA_BR*HEAD_DIM*sizeof(float)       // Os
+            + (size_t)3*FA_BR*sizeof(float)              // ms, ds, as
+              <= 48*1024,
+              "flashAttentionPrefill keeps its tiles in static shared memory, which is "
+              "capped at 48 KiB per block");
+
 static_assert(MAX_SEQ_LEN <= MAX_NUM_THREAD,
               "decodeSoftmax reduces one row per block, so a sequence cannot be "
               "longer than one block of threads");
@@ -105,6 +125,8 @@ void init_rope_frequencies(int head_dim, int max_seq_len, float rope_theta,float
 void free_rope_frequencies(void);
 void rope(bf16* input, int num_tokens, int proj_dim);
 void causalMask(bf16* input, int num_tokens);
+void flashAttentionPrefill(const bf16* q, const bf16* k, const bf16* v,
+                           bf16* out, int num_tokens);
 
 // decode
 void decodeSoftmax(bf16* attention_scores, int seq_len);

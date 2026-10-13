@@ -153,6 +153,119 @@ void causalMask(bf16* input, int num_tokens) {
 
 }
 
+__global__ void flashAttentionPrefillKernel(const bf16* __restrict__ q,
+                                            const bf16* __restrict__ k,
+                                            const bf16* __restrict__ v,
+                                            bf16* __restrict__ out,
+                                            int num_tokens, float scale) {
+  __shared__ bf16  Qs[FA_BR][HEAD_DIM];
+  __shared__ bf16  Ks[FA_BC][HEAD_DIM + 2]; // padded, an unpadded row stride is exactly 32 banks
+  __shared__ bf16  Vs[FA_BC][HEAD_DIM];
+  __shared__ float Ss[FA_BR][FA_BC];        // the score tile, never written to HBM
+  __shared__ float Os[FA_BR][HEAD_DIM];     // output accumulator, normalized only at the end
+  __shared__ float ms[FA_BR];               // running max per query row
+  __shared__ float ds[FA_BR];               // running sum of exp per query row
+  __shared__ float as[FA_BR];               // exp(m_old - m_new), this tile's rescale factor
+
+  const int q0     = blockIdx.x*FA_BR;
+  const int q_head = blockIdx.y;
+  const int k_head = q_head / GQA_Q_TO_K_RATIO;
+
+  const int tx  = threadIdx.x;
+  const int ty  = threadIdx.y;
+  const int tid = ty*32 + tx;
+
+  const bf16* q_base = q + (size_t)q0*E_DIM + q_head*HEAD_DIM;
+  const bf16* k_base = k + k_head*HEAD_DIM;
+  const bf16* v_base = v + k_head*HEAD_DIM;
+
+  for(int e=tid; e<FA_BR*HEAD_DIM; e+=FA_THREADS) {
+    int i = e/HEAD_DIM, c = e%HEAD_DIM;
+    Qs[i][c] = (q0+i < num_tokens) ? q_base[(size_t)i*E_DIM + c] : (bf16)0.0f;
+    Os[i][c] = 0.0f;
+  }
+  if(tid < FA_BR) {
+    ms[tid] = -INF;
+    ds[tid] = 0.0f;
+  }
+  __syncthreads();
+
+  const int kv_end = (q0 + FA_BR < num_tokens) ? q0 + FA_BR : num_tokens;
+
+  for(int kv0=0; kv0<kv_end; kv0+=FA_BC) {
+    for(int e=tid; e<FA_BC*HEAD_DIM; e+=FA_THREADS) {
+      int j = e/HEAD_DIM, c = e%HEAD_DIM;
+      bool live = (kv0+j) < num_tokens;
+      Ks[j][c] = live ? k_base[(size_t)(kv0+j)*KV_DIM + c] : (bf16)0.0f;
+      Vs[j][c] = live ? v_base[(size_t)(kv0+j)*KV_DIM + c] : (bf16)0.0f;
+    }
+    __syncthreads();
+
+    // S = Q @ Kt * scale, masked. the scale cublas used to fold into alpha lives here now
+    for(int i=ty; i<FA_BR; i+=FA_THREADS/32) {
+      float acc = 0.0f;
+      for(int c=0; c<HEAD_DIM; c++) acc += (float)Qs[i][c] * (float)Ks[tx][c];
+
+      int q_pos = q0 + i, k_pos = kv0 + tx;
+      Ss[i][tx] = (q_pos < num_tokens && k_pos <= q_pos) ? acc*scale : -INF;
+    }
+    __syncthreads();
+
+    for(int i=ty; i<FA_BR; i+=FA_THREADS/32) {
+      float s = Ss[i][tx];
+
+      float tile_max = s;
+      for(int off=16; off>0; off>>=1) tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffff, tile_max, off));
+
+      float m_old = ms[i];
+      float m_new = fmaxf(m_old, tile_max);
+
+      float p = (m_new == -INF) ? 0.0f : expf(s - m_new);
+      Ss[i][tx] = p;
+
+      float tile_sum = p;
+      for(int off=16; off>0; off>>=1) tile_sum += __shfl_xor_sync(0xffffffff, tile_sum, off);
+
+      if(tx == 0) {
+        float alpha = (m_new == -INF) ? 1.0f : expf(m_old - m_new);
+        as[i] = alpha;                        // Os still needs it after ms[i] is overwritten
+        ds[i] = ds[i]*alpha + tile_sum;
+        ms[i] = m_new;
+      }
+    }
+    __syncthreads();
+
+    for(int e=tid; e<FA_BR*HEAD_DIM; e+=FA_THREADS) {
+      int i = e/HEAD_DIM, c = e%HEAD_DIM;
+      float acc = 0.0f;
+      for(int j=0; j<FA_BC; j++) acc += Ss[i][j] * (float)Vs[j][c];
+      Os[i][c] = Os[i][c]*as[i] + acc;
+    }
+    __syncthreads();
+  }
+
+  bf16* o_base = out + (size_t)q0*E_DIM + q_head*HEAD_DIM;
+  for(int e=tid; e<FA_BR*HEAD_DIM; e+=FA_THREADS) {
+    int i = e/HEAD_DIM, c = e%HEAD_DIM;
+    if(q0+i >= num_tokens) continue;
+    o_base[(size_t)i*E_DIM + c] = (bf16)(Os[i][c] / ds[i]);
+  }
+}
+
+void flashAttentionPrefill(const bf16* q, const bf16* k, const bf16* v,
+                           bf16* out, int num_tokens) {
+  if(num_tokens < 1) return;
+
+  dim3 grid((num_tokens + FA_BR - 1)/FA_BR, NUM_Q_HEADS);
+  dim3 block(32, FA_THREADS/32);
+  flashAttentionPrefillKernel<<<grid, block>>>(q, k, v, out, num_tokens, 1.0f/SQRT_HEAD_DIM);
+
+  cudaError error = cudaGetLastError();
+  if(error != cudaError::cudaSuccess) {
+    std::cerr << "CUDA last error in flashAttentionPrefill: " << cudaGetErrorString(error) << std::endl;
+  }
+}
+
 void init_rope_frequencies(
   int head_dim, int max_seq_len, float rope_theta, // usually 10000
   float factor, float low_freq_factor,

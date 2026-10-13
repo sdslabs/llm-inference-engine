@@ -75,7 +75,6 @@ void forwardPrefill(const std::vector<int>& prompt, int prompt_len, int slot,
   bf16* q_proj = buf.q_proj;
   bf16* k_proj = buf.k_proj;
   bf16* v_proj = buf.v_proj;
-  bf16* attn_scores = buf.attn_scores;
   bf16* attn_out = buf.attn_out;
   bf16* o_proj = buf.o_proj;
   bf16* gate = buf.gate;
@@ -100,43 +99,7 @@ void forwardPrefill(const std::vector<int>& prompt, int prompt_len, int slot,
     cudaMemcpy(layerK(slot_cache, layer), k_proj, prompt_len*KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
     cudaMemcpy(layerV(slot_cache, layer), v_proj, prompt_len*KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
 
-    const float scale = 1.0f / SQRT_HEAD_DIM;
-    const float zero = 0.0f, one = 1.0f;
-
-    for (int g = 0; g < NUM_K_HEADS; g++) {
-      const bf16* Kg = k_proj + (size_t)g*HEAD_DIM;
-      const bf16* Qg = q_proj + (size_t)g*GQA_Q_TO_K_RATIO*HEAD_DIM;
-      bf16* Sg = attn_scores + (size_t)g*GQA_Q_TO_K_RATIO*prompt_len*prompt_len;
-
-      cublasGemmStridedBatchedEx(
-          cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-          prompt_len, prompt_len, HEAD_DIM,
-          &scale,
-          Kg, CUDA_R_16BF, KV_DIM,     0,
-          Qg, CUDA_R_16BF, E_DIM,      (long long)HEAD_DIM,
-          &zero,
-          Sg, CUDA_R_16BF, prompt_len, (long long)prompt_len*prompt_len,
-          GQA_Q_TO_K_RATIO, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    }
-
-    causalMask(attn_scores, prompt_len);
-    softmax(attn_scores, prompt_len);
-
-    for (int g = 0; g < NUM_K_HEADS; g++) {
-      const bf16* Vg = v_proj + (size_t)g*HEAD_DIM;
-      const bf16* Sg = attn_scores + (size_t)g*GQA_Q_TO_K_RATIO*prompt_len*prompt_len;
-      bf16* Og = attn_out + (size_t)g*GQA_Q_TO_K_RATIO*HEAD_DIM;
-
-      cublasGemmStridedBatchedEx(
-          cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-          HEAD_DIM, prompt_len, prompt_len,
-          &one,
-          Vg, CUDA_R_16BF, KV_DIM,     0,
-          Sg, CUDA_R_16BF, prompt_len, (long long)prompt_len*prompt_len,
-          &zero,
-          Og, CUDA_R_16BF, E_DIM,      (long long)HEAD_DIM,
-          GQA_Q_TO_K_RATIO, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    }
+    flashAttentionPrefill(q_proj, k_proj, v_proj, attn_out, prompt_len);
 
     linear(cublas_handle, attn_out, weights.w_o[layer], o_proj, prompt_len, E_DIM, E_DIM);
     residualAdd(o_proj, hidden_state, prompt_len);
