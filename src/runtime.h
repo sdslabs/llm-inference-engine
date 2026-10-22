@@ -49,6 +49,7 @@ int loadWeights(Weights& weights, std::filesystem::path model_path);
 // scratch memory, allocated once at startup and reused by every request
 struct Buffers {
   bf16* kv_cache = nullptr;             // MAX_SEQUENCES x N_LAYERS x 2 x MAX_SEQ_LEN x KV_DIM
+  int* gpu_block_table = nullptr;
 
   int* gpu_input_tokens = nullptr;
   int* gpu_positions = nullptr;         // MAX_SEQUENCES, cache position of each row

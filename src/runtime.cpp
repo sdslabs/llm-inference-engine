@@ -201,6 +201,10 @@ int Buffers::allocate(bool score_mode) {
   cudaMalloc(&kv_cache, kv_bytes);
   cudaMemset(kv_cache, 0, kv_bytes);
 
+  size_t block_table_sz = (size_t)MAX_SEQUENCES * MAX_BLOCKS * sizeof(int);
+  cudaMalloc(&gpu_block_table, block_table_sz);
+  cudaMemset(gpu_block_table, 0, block_table_sz);
+
   // residual stream scratch
   cudaMalloc(&gpu_input_tokens, (size_t)MAX_PROMPT_LEN * sizeof(int));
   cudaMalloc(&gpu_positions,    (size_t)MAX_SEQUENCES * sizeof(int));
