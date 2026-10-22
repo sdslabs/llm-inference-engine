@@ -201,7 +201,7 @@ int Buffers::allocate(bool score_mode) {
   cudaMalloc(&kv_cache, kv_bytes);
   cudaMemset(kv_cache, 0, kv_bytes);
 
-  size_t block_table_sz = (size_t)MAX_SEQUENCES * MAX_BLOCKS * sizeof(int);
+  size_t block_table_sz = (size_t)MAX_SEQUENCES * MAX_BLOCKS_PER_SEQ * sizeof(int);
   cudaMalloc(&gpu_block_table, block_table_sz);
   cudaMemset(gpu_block_table, 0, block_table_sz);
 
@@ -253,7 +253,7 @@ int Buffers::allocate(bool score_mode) {
 }
 
 void Buffers::free() {
-  cudaFree(kv_cache);
+  cudaFree(kv_cache); cudaFree(gpu_block_table);
   cudaFree(gpu_input_tokens); cudaFree(gpu_positions); cudaFree(gpu_slots);
   cudaFree(hidden_state); cudaFree(rms_norms);
   cudaFree(q_proj); cudaFree(k_proj); cudaFree(v_proj);

@@ -96,6 +96,10 @@ void forwardPrefill(const std::vector<int>& prompt, int prompt_len, int slot,
     rope(q_proj, prompt_len, E_DIM );
     rope(k_proj, prompt_len, KV_DIM);
 
+    //need one kernel to copy data from these projection matrices, ydk inital promp len...you could parallelize ts ig
+    //using multiple streams but stream launch overhead maybe higher in some cases so best microoptimization is benchmark for 
+    //various prompt lengths and use synchronous transfers for a size smaller than a threshold...plus these copying operations
+    //can be parallelized with useful computation too like flashattentionprefillwmma
     cudaMemcpy(layerK(slot_cache, layer), k_proj, prompt_len*KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
     cudaMemcpy(layerV(slot_cache, layer), v_proj, prompt_len*KV_DIM*sizeof(bf16), cudaMemcpyDeviceToDevice);
 

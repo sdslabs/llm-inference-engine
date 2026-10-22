@@ -64,7 +64,7 @@ constexpr int MAX_NUM_THREAD = ENGINE_MAX_NUM_THREAD;
 constexpr int MAX_TOP_K = ENGINE_MAX_TOP_K;
 constexpr int BLOCK_TOKEN_COUNT = 16; // number of tokens whose kv cache data is stored in one block 
 // the formula used below calculates ceil(MAX_SEQ_LEN / BLOCK_TOKEN_COUNT)
-constexpr int MAX_BLOCKS = (MAX_SEQ_LEN + BLOCK_TOKEN_COUNT - 1) / BLOCK_TOKEN_COUNT // maximum number of blocks allocatable for a user's request
+constexpr int MAX_BLOCKS_PER_SEQ = (MAX_SEQ_LEN + BLOCK_TOKEN_COUNT - 1) / BLOCK_TOKEN_COUNT; // maximum number of blocks allocatable for a user's request
 constexpr float INF = 1e18;          // stand in for infinity in the causal mask
 
 // starting values for the CLI flags, overridable per run
