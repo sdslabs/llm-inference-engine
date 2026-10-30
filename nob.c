@@ -5,6 +5,7 @@
 
 static const char* REQUIRED_KEYS[] = {
     "ARCH",
+    "HARDWARE_MICROARCH",
     "MAX_SEQUENCES",
     "MAX_PROMPT_LEN",
     "MAX_SEQ_LEN",
@@ -28,13 +29,13 @@ int check_required_env(void) {
 }
 
 int load_dotenv(void) {
-    if(!nob_file_exists(".env")) {
+    if(!nob_file_exists(".env.example")) {
         nob_log(NOB_ERROR, ".env not found; it is the only source for the build limits");
         return 0;
     }
 
     Nob_String_Builder sb = {0};
-    if(!nob_read_entire_file(".env", &sb)) return 0;
+    if(!nob_read_entire_file(".env.example", &sb)) return 0;
 
     Nob_String_View content = {.count=sb.count, .data = sb.items};
 
@@ -74,6 +75,28 @@ const char* resolve_cuda_path(void) {
     return "/usr/local/cuda";
 }
 
+const char* resolve_hip_path(void) {
+    const char* env_path = getenv("ROCM_PATH");
+    if(env_path && strlen(env_path) > 0) return env_path;
+    env_path = getenv("HIP_PATH");
+
+    if(env_path && strlen(env_path) > 0) return env_path;
+    if(nob_file_exists("/opt/rocm")) return "/opt/rocm";
+    if(nob_file_exists("/opt/rocm/hip/")) return "/opt/rocm/hip/";
+
+    // Fallback
+    return "/opt/rocm";
+}
+
+const char* resolve_gpu_compat_path(void) {
+    const char* header_path = getenv("GPU_COMPAT_PATH");
+    if (header_path && strlen(header_path) > 0) return header_path;
+    else {
+        nob_log(NOB_ERROR, "define the missing keys in .env, or export them to override");
+        return "";
+    }
+}
+
 void append_limits(Nob_Cmd* cmd) {
     nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_SEQUENCES=%s", getenv("MAX_SEQUENCES")));
     nob_cmd_append(cmd, nob_temp_sprintf("-DENGINE_MAX_PROMPT_LEN=%s", getenv("MAX_PROMPT_LEN")));
@@ -102,22 +125,50 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* cuda_path = resolve_cuda_path();
-    nob_log(NOB_INFO, "Using cuda path: %s", cuda_path);
+    // resolve path based on the micro architecture
+    const char* microarch = getenv("HARDWARE_MICROARCH");
+    const char* compiler_path;
+
+    const char* gpu_compat = getenv("GPU_COMPAT_PATH");
+    if (!strcmp(gpu_compat, "")) return 1;
 
     if(!nob_mkdir_if_not_exists("build")) return 1;
 
     const char* arch = getenv("ARCH");
     const char* tokenizer_dir = "external/tokenizers-cpp";
 
-    // Compile CUDA kernals
-    Nob_Cmd nvcc = {0};
-    nob_cmd_append(&nvcc, "nvcc", "-O3", nob_temp_sprintf("-arch=%s", arch));
-    append_limits(&nvcc);
-    nob_cmd_append(&nvcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+    if (!strcmp(microarch, "nvidia"))
+    {
+        compiler_path = resolve_cuda_path();
+        nob_log(NOB_INFO, "Using cuda path: %s", compiler_path);
 
-    nob_log(NOB_INFO, "Compiling CUDA Kernels for %s ", arch);
-    if(!nob_cmd_run_sync(nvcc)) return 1;
+        if (!nob_mkdir_if_not_exists("build")) return 1;
+
+        // Compile CUDA kernels
+        Nob_Cmd nvcc = {0};
+        nob_cmd_append(&nvcc, "nvcc", "-O3", nob_temp_sprintf("-arch=%s", arch));
+        append_limits(&nvcc);
+        nob_cmd_append(&nvcc, "-c", "src/kernels.cu", "-o", "build/kernels.o");
+
+        nob_log(NOB_INFO, "Compiling CUDA Kernels for %s ", arch);
+        if(!nob_cmd_run_sync(nvcc)) return 1;
+    }
+    else
+    {
+        compiler_path = resolve_hip_path();
+        nob_log(NOB_INFO, "Using hip path: %s", compiler_path);
+
+        if (!nob_mkdir_if_not_exists("build")) return 1;
+
+        // Compile HIP kernels
+        Nob_Cmd hipcc = {0};
+        nob_cmd_append(&hipcc, "hipcc", "-O3", "-x", "hip", nob_temp_sprintf("--offload-arch=%s", arch));
+        append_limits(&hipcc);
+        nob_cmd_append(&hipcc, "-DUSE_ROCM", "-include", nob_temp_sprintf("%s", gpu_compat), "-c", "src/kernels.cu", "-o", "build/kernels.o");
+
+        nob_log(NOB_INFO, "Compiling HIP Kernels for %s", arch);
+        if(!nob_cmd_run_sync(hipcc)) return 1;
+    }
 
     // Compile Main Binary
     Nob_Cmd gpp = {0};
@@ -132,16 +183,32 @@ int main(int argc, char** argv) {
     );
 
     // Output
-    nob_cmd_append(&gpp, "-o", "build/engine");
+    if (!strcmp(microarch, "nvidia"))
+    {
+        nob_cmd_append(&gpp, "-o", "build/cuda");
+    }
+    else
+    {
+        nob_cmd_append(&gpp, "-o", "build/hip");
+    }
 
     // Includes
     nob_cmd_append(&gpp, "-Isrc");
     nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", tokenizer_dir));
-    nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", cuda_path));
+    nob_cmd_append(&gpp, nob_temp_sprintf("-I%s/include", compiler_path));
 
     // Libraries
     nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/build", tokenizer_dir), "-ltokenizers_cpp", "-ltokenizers_c");
-    nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/lib64", cuda_path), "-lcudart", "-lcublas");
+    nob_cmd_append(&gpp, nob_temp_sprintf("-L%s/lib64", compiler_path));
+    
+    if(!strcmp(microarch, "nvidia"))
+    {
+        nob_cmd_append(&gpp, "-lcudart", "-lcublas");
+    }
+    else
+    {
+        nob_cmd_append(&gpp, "-lamdhip64", "-lhipblas");
+    }
 
     nob_log(NOB_INFO, "Compiling Main Binary..");
     if(!nob_cmd_run_sync(gpp)) return 1;
