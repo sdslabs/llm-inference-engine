@@ -226,7 +226,7 @@ int main(int argc, char* argv[]) {
   
   Weights weights;
   if(loadWeights(weights, cfg.model_path)) return 1;
-  
+
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
   

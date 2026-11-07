@@ -1,4 +1,5 @@
 #include "config.h"
+#include "runtime.h"
 #include <fstream>
 #include <iostream>
 
@@ -16,6 +17,7 @@ static void usage(const char* prog) {
     << "  --greedy                 argmax sampling, same as --top-k 1\n"
     << "  --seed <n>               seed the sampler, default nondeterministic\n"
     << "  --score                  emit per token logprobs instead of generating\n"
+    << "  --quantize_save          quantize weights to INT8 and save as safetensor\n"
     << "  --output <file.jsonl>    default stdout\n";
 }
 
@@ -85,6 +87,10 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
       if(arg == "--help" || arg == "-h") {
         usage(argv[0]);
         return ParseResult::Exit;
+      } else if(arg == "--quantize_save") {
+        quantWeights(fs::path(argv[1]));
+        std::cout << "Quantization complete. Saved as quantized.safetensor\n";
+        return ParseResult::Exit;
       } else if(arg == "--max-new-tokens") {
         std::string v = value("--max-new-tokens");
         if(!v.empty()) cfg.max_new_tokens = std::stoi(v);
@@ -128,7 +134,7 @@ ParseResult parseArgs(int argc, char* argv[], Config& cfg) {
 
   cfg.model_path = positional[0];
   cfg.tokenizer_path = positional[1];
-  
+
   // Loading prompts from txt file only if prompts.txt is provided
   if(positional.size() == 3) {
     cfg.prompts_path = positional[2];
