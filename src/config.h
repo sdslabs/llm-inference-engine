@@ -19,7 +19,6 @@ struct Config {
 
   unsigned long long seed = 0;
   bool seeded = false;
-
   bool score_mode = false;
   bool server_mode = false;
   std::filesystem::path output_path;
