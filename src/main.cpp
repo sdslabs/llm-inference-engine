@@ -359,6 +359,7 @@ int main(int argc, char* argv[]) {
 
     std::atomic<int> completed_requests{0};
     int total_requests = static_cast<int>(cfg.prompts.size());
+    std::vector<std::string> generated(total_requests);
 
     for(size_t i{0}; i<cfg.prompts.size(); i++) {
       ClientRequest req;
@@ -371,11 +372,11 @@ int main(int argc, char* argv[]) {
       }
 
       req.max_tokens = cfg.max_new_tokens;
-      req.on_token = [&completed_requests, out](const std::string& token_text, bool is_finished) {
-        if(!is_finished) {
-          *out << token_text << std::flush;
-        } else {
-          *out << "\n" << std::flush;
+      req.on_token = [&completed_requests, &generated, out, i](const std::string& token_text, bool is_finished) {
+        generated[i] += token_text;
+        if(is_finished) {
+          *out << generated[i] << "\n" << std::flush;
+          generated[i].clear();
           completed_requests++;
         }
       };
