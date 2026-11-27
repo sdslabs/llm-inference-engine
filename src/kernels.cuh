@@ -4,6 +4,8 @@
 #include <cublas_v2.h>
 
 using bf16 = __nv_bfloat16;
+template <typename T>
+using roPtr = const T* __restrict__;
 
 // unit conversion
 constexpr int B_TO_MB = 1024 * 1024;
@@ -62,6 +64,11 @@ constexpr int MAX_PROMPT_LEN = ENGINE_MAX_PROMPT_LEN;
 constexpr int MAX_SEQ_LEN = ENGINE_MAX_SEQ_LEN;
 constexpr int MAX_NUM_THREAD = ENGINE_MAX_NUM_THREAD;
 constexpr int MAX_TOP_K = ENGINE_MAX_TOP_K;
+constexpr int BLOCK_TOKEN_COUNT = 16; // number of tokens whose kv cache data is stored in one block 
+// the formula used below calculates ceil(MAX_SEQ_LEN / BLOCK_TOKEN_COUNT)
+constexpr int MAX_BLOCKS_PER_SEQ = (MAX_SEQ_LEN + BLOCK_TOKEN_COUNT - 1) / BLOCK_TOKEN_COUNT; // maximum number of blocks allocatable for a user's request
+constexpr int TOTAL_BLOCKS = MAX_SEQUENCES * MAX_BLOCKS_PER_SEQ;
+constexpr size_t KV_SLAB_ELEMS = (size_t)NUM_K_HEADS * BLOCK_TOKEN_COUNT * HEAD_DIM;
 constexpr float INF = 1e18;          // stand in for infinity in the causal mask
 
 // starting values for the CLI flags, overridable per run
@@ -89,17 +96,14 @@ static_assert((size_t)FA_BR*HEAD_DIM*sizeof(bf16)        // Qs
               "flashAttentionPrefill keeps its tiles in static shared memory, which is "
               "capped at 48 KiB per block");
 
-static_assert(MAX_SEQ_LEN <= MAX_NUM_THREAD,
-              "decodeSoftmax reduces one row per block, so a sequence cannot be "
-              "longer than one block of threads");
 static_assert(MAX_PROMPT_LEN <= MAX_NUM_THREAD,
               "softmax and causalMask launch one thread per prompt position");
 static_assert(MAX_PROMPT_LEN <= MAX_SEQ_LEN,
               "a prompt has to fit in the KV cache");
 static_assert(E_DIM / 2 <= MAX_NUM_THREAD,
               "rmsNorm, embeddingGather and residualAdd launch E_DIM/2 threads");
-static_assert(KV_DIM <= MAX_NUM_THREAD,
-              "kvCacheScatter launches one thread per K or V column");
+static_assert(KV_DIM / 8 <= MAX_NUM_THREAD,
+              "kvCacheScatter launches 8 threads per K or V head");
 static_assert(FA_BR % 16 == 0 && FA_BC % 16 == 0 && HEAD_DIM % 16 == 0,
               "flashAttentionPrefillWmma tiles both matmuls with 16x16x16 fragments");
 static_assert((FA_BR/16)*(FA_BC/16) <= FA_THREADS/32 &&
@@ -138,11 +142,11 @@ void flashAttentionPrefillWmma(const bf16* q, const bf16* k, const bf16* v,
                                bf16* out, int num_tokens);
 
 // decode
-void decodeSoftmax(bf16* attention_scores, const int* positions, int num_rows, int max_len);
 void ropeDecode(bf16* input, const int* positions, int num_rows, int proj_dim);
-void kvCacheScatter(bf16* kv_cache, const bf16* k_proj, const bf16* v_proj,
-                    const int* slots, const int* positions, int num_rows, int layer);
-
+void kvCacheScatter(bf16* kv_cache, roPtr<int> block_table, roPtr<bf16> k_proj, roPtr<bf16> v_proj,
+                    int layer, roPtr<int> slots, roPtr<int> positions, int num_rows);
+void pagedGQA(roPtr<bf16> kv_cache, roPtr<int> block_table, roPtr<bf16> q_proj, bf16* attn_out,
+              int layer, roPtr<int> slots, roPtr<int> positions, int batch_size);
 void topKSample(const bf16* logits, int* sampled_tokens, const float* uniform_rand,
                 int num_rows, int k, float temperature);
 

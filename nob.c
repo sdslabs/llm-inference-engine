@@ -128,6 +128,7 @@ int main(int argc, char** argv) {
     nob_cmd_append(&gpp,
         "src/main.cpp", "src/config.cpp", "src/runtime.cpp",
         "src/model.cpp", "src/score.cpp", "src/telemetry.cpp",
+        "src/block_manager.cpp",
         "build/kernels.o"
     );
 

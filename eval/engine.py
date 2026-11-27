@@ -134,6 +134,31 @@ def escape_line(text: str) -> str:
     return "".join(out)
 
 
+_DECODER = json.JSONDecoder()
+
+
+def _trailing_record(line: str):
+    """Pull a JSONL record off the end of a stdout line.
+
+    The engine streams generated text to stdout without a trailing newline, so
+    a record can share its line with that text, e.g. `I think.{"arrival_ms":...}`.
+    Keys are emitted sorted, so "type" is not first; instead try each '{' and
+    keep the first that parses as an object running to the end of the line.
+    The streamed text itself may contain '{', hence trying them in order.
+    """
+    start = line.find("{")
+    while start >= 0:
+        try:
+            obj, end = _DECODER.raw_decode(line, start)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if end == len(line) and isinstance(obj, dict) and "type" in obj:
+                return obj
+        start = line.find("{", start + 1)
+    return None
+
+
 def run(prompts: list, timeout: int = 3600, **flags) -> list[dict]:
     """Invoke the engine once and return its parsed JSONL records.
 
@@ -184,13 +209,9 @@ def run(prompts: list, timeout: int = 3600, **flags) -> list[dict]:
 
         records = []
         for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise EngineError(f"non-JSON line on stdout: {line[:200]}") from exc
+            record = _trailing_record(line.strip())
+            if record is not None:
+                records.append(record)
 
         idents = [ident for ident, _ in entries]
         for record in records:

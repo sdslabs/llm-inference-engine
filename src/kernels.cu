@@ -508,77 +508,125 @@ void rope(bf16* input, int num_tokens, int proj_dim) {
 
 }
 
-__global__ void decodeSoftmaxKernel(bf16* attention_scores, const int* positions) {
-  __shared__ float m[MAX_NUM_THREAD];
-  __shared__ float d[MAX_NUM_THREAD];
 
-  int seq_len = positions[blockIdx.x / NUM_Q_HEADS] + 1;
-  int workIdx = blockIdx.x * MAX_SEQ_LEN + threadIdx.x;
-  float token = -INF;
-  if(threadIdx.x < seq_len) token = (float)attention_scores[workIdx];
+__global__ void kvCacheScatterKernel(bf16* kv_cache, roPtr<int> block_table, roPtr<bf16> k_proj, roPtr<bf16> v_proj,
+                                     roPtr<int> slots, roPtr<int> positions, int layer) {
+  // one block works to copy one layer's kv cache of one token
+  // each thread copies 16 contiguous bytes for k cache and 16 contiguous bytes for v cache
+  // thus kv_dim bf16s are divided into (kv_dim * 2 / 16) 16-byte groups which equals the thread count in a block
 
-  m[threadIdx.x] = token;
-  d[threadIdx.x] = 1.0f;
-  __syncthreads();
+  int batch_token_idx  = blockIdx.x;
+  const int byte_group = threadIdx.x; 
 
-  // binary tree types
-  for(int i=1; i<seq_len; i*=2) {
-    if(threadIdx.x % (i*2) == 0 && threadIdx.x + i < seq_len) {
-      float m_a = m[threadIdx.x];
-      float d_a = d[threadIdx.x];
-      float m_b = m[threadIdx.x+i];
-      float d_b = d[threadIdx.x+i];
+  constexpr int VECS_PER_HEAD = HEAD_DIM / 8;               // no. of threads per kv head
+  const int head_idx          = byte_group / VECS_PER_HEAD; // index of the kv head from which the thread will copy
+  const int dim_offset        = (byte_group % VECS_PER_HEAD) * 8; 
 
-      float m_new = fmaxf(m_a, m_b);
-      float d_new = d_a*expf(m_a-m_new) + d_b*expf(m_b - m_new);
+  const int slot           = slots[batch_token_idx];
+  const int position       = positions[batch_token_idx];
+  const int logical_block  = position / BLOCK_TOKEN_COUNT;
+  const int token_in_block = position % BLOCK_TOKEN_COUNT;
+  const int physical_block = block_table[(size_t)slot * MAX_BLOCKS_PER_SEQ + logical_block];
 
-      m[threadIdx.x] = m_new;
-      d[threadIdx.x] = d_new;
-    }
-    __syncthreads();
-  }
+  bf16* physical_block_base = kv_cache + ((size_t)layer * TOTAL_BLOCKS + physical_block) * 2 * KV_SLAB_ELEMS;
 
-  if(threadIdx.x < seq_len) {
-    attention_scores[workIdx] = (bf16)(expf(token - m[0]) / d[0]);
-  } else {
-    attention_scores[workIdx] = (bf16)0.0f;
-  }
+  const size_t in_slab_offset = ((size_t)head_idx * BLOCK_TOKEN_COUNT + token_in_block) * HEAD_DIM + dim_offset;
+
+  bf16* dst_k = physical_block_base + in_slab_offset;
+  bf16* dst_v = physical_block_base + KV_SLAB_ELEMS + in_slab_offset;
+
+  const size_t src_offset = (size_t)batch_token_idx * KV_DIM + byte_group * 8;
+  const bf16* src_k = k_proj + src_offset;
+  const bf16* src_v = v_proj + src_offset;
+
+  *reinterpret_cast<uint4*>(dst_k) = *reinterpret_cast<const uint4*>(src_k);
+  *reinterpret_cast<uint4*>(dst_v) = *reinterpret_cast<const uint4*>(src_v);
 }
 
-void decodeSoftmax(bf16* attention_scores, const int* positions, int num_rows, int max_len) {
-  if(num_rows < 1) return;
-  if (max_len > MAX_NUM_THREAD) {
-    std::cerr << "decodeSoftmax: max_len " << max_len << " exceeds " << MAX_NUM_THREAD << "\n";
-    return;
-  }
-  decodeSoftmaxKernel<<<num_rows*NUM_Q_HEADS, max_len>>>(attention_scores, positions);
-  cudaError error = cudaGetLastError();
-  if(error != cudaError::cudaSuccess) {
-    std::cerr << "CUDA last error in decodeSoftmax: " << cudaGetErrorString(error) << std::endl;
-  }
-}
-
-__global__ void kvCacheScatterKernel(bf16* kv_cache, const bf16* k_proj, const bf16* v_proj,
-                                     const int* slots, const int* positions, int layer) {
-  int b = blockIdx.x;
-  int c = threadIdx.x;
-
-  bf16* slot_cache = kv_cache + (size_t)slots[b]*N_LAYERS*2*MAX_SEQ_LEN*KV_DIM;
-  bf16* dst_k = slot_cache + (size_t)2*layer*MAX_SEQ_LEN*KV_DIM + (size_t)positions[b]*KV_DIM;
-  bf16* dst_v = dst_k + (size_t)MAX_SEQ_LEN*KV_DIM;
-
-  dst_k[c] = k_proj[(size_t)b*KV_DIM + c];
-  dst_v[c] = v_proj[(size_t)b*KV_DIM + c];
-}
-
-void kvCacheScatter(bf16* kv_cache, const bf16* k_proj, const bf16* v_proj,
-                    const int* slots, const int* positions, int num_rows, int layer) {
+void kvCacheScatter(bf16* kv_cache, roPtr<int> block_table, roPtr<bf16> k_proj, roPtr<bf16> v_proj,
+                    int layer, roPtr<int> slots, roPtr<int> positions, int num_rows) {
   if(num_rows < 1) return;
 
-  kvCacheScatterKernel<<<num_rows, KV_DIM>>>(kv_cache, k_proj, v_proj, slots, positions, layer);
+  kvCacheScatterKernel<<<num_rows, KV_DIM/8>>>(kv_cache, block_table, k_proj, v_proj, slots, positions, layer);
   cudaError error = cudaGetLastError();
   if(error != cudaError::cudaSuccess) {
     std::cerr << "CUDA last error in kvCacheScatter: " << cudaGetErrorString(error) << std::endl;
+  }
+}
+
+__global__ void pagedGQAKernel(roPtr<bf16> kv_cache, roPtr<int> block_table, roPtr<bf16> q_proj, bf16* attn_out,
+                               int layer, roPtr<int> slots, roPtr<int> positions) {
+  int batch_idx = blockIdx.z;
+  int group = blockIdx.y; // which group out of the NUM_K_HEADS gqa groups this block works on
+  int seq_len = positions[batch_idx] + 1; // add 1 since decode updates seq_len later but the token has already been added to the kv cache
+  const int slot = slots[batch_idx];
+
+  const bf16* q_group_ptr = q_proj + batch_idx * E_DIM + group * GQA_Q_TO_K_RATIO * HEAD_DIM;
+  const int q_head = threadIdx.y;
+  const int lane = threadIdx.x;
+  
+  float m = -INF;
+  float d = 0.0f;
+  float scale = 1.0f / SQRT_HEAD_DIM;
+  float qv[HEAD_DIM / 32], acc[HEAD_DIM / 32];
+
+  #pragma unroll
+  for(int i = 0; i < HEAD_DIM / 32; i++) {
+    qv[i] = float(*(q_group_ptr + q_head * HEAD_DIM + lane + 32 * i));
+    acc[i] = 0.0f;
+  }
+
+  for(int i = 0; i < seq_len; i++) {
+    const int block_idx = block_table[(size_t)slot * MAX_BLOCKS_PER_SEQ + i / BLOCK_TOKEN_COUNT];
+    const bf16* physical_block_base = kv_cache + ((size_t)layer * TOTAL_BLOCKS + block_idx) * 2 * KV_SLAB_ELEMS;
+    
+    float dot = 0.0f;
+    const bf16* k_ptr = physical_block_base + (group * BLOCK_TOKEN_COUNT + i % BLOCK_TOKEN_COUNT) * HEAD_DIM + lane;
+
+    #pragma unroll
+    for(int j = 0; j < HEAD_DIM / 32; j++) {
+      float k_val = float(*(k_ptr + 32 * j));
+      dot += qv[j] * k_val;
+    }
+
+    dot += __shfl_down_sync(0xffffffff, dot, 16);
+    dot += __shfl_down_sync(0xffffffff, dot, 8);
+    dot += __shfl_down_sync(0xffffffff, dot, 4);
+    dot += __shfl_down_sync(0xffffffff, dot, 2);
+    dot += __shfl_down_sync(0xffffffff, dot, 1);
+    dot *= scale;
+    dot =  __shfl_sync(0xffffffff, dot, 0);
+
+    float m_new = fmaxf(dot, m);
+    float correction_factor = expf(m - m_new);
+    float newVal = expf(dot - m_new);
+    d = d * correction_factor + newVal;
+    m = m_new;
+
+    const bf16* v_ptr = k_ptr + KV_SLAB_ELEMS;
+    for(int j = 0; j < HEAD_DIM / 32; j++) {
+      float v_val = float(*(v_ptr + 32 * j));
+      acc[j] = acc[j] * correction_factor + newVal * v_val;
+    }
+  }
+
+  const int out_idx = batch_idx * E_DIM + (group * GQA_Q_TO_K_RATIO + q_head) * HEAD_DIM + lane;
+  for(int j = 0; j < HEAD_DIM / 32; j++) {
+    acc[j] /= d;
+    attn_out[out_idx + 32 * j] = bf16(acc[j]);
+  }
+
+}
+
+void pagedGQA(roPtr<bf16> kv_cache, roPtr<int> block_table, roPtr<bf16> q_proj, bf16* attn_out, int layer,
+              roPtr<int> slots, roPtr<int> positions, int batch_size) {
+  if(batch_size < 1) return;
+  dim3 grid_dimensions(1, NUM_K_HEADS, batch_size);
+  dim3 block_dimensions(32, GQA_Q_TO_K_RATIO, 1);
+  pagedGQAKernel<<<grid_dimensions, block_dimensions>>>(kv_cache, block_table, q_proj, attn_out, layer, slots, positions);
+  cudaError error = cudaGetLastError();
+  if(error != cudaError::cudaSuccess) {
+    std::cerr << "CUDA last error in pagedGQA: " << cudaGetErrorString(error) << std::endl;
   }
 }
 
