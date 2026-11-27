@@ -209,6 +209,8 @@ int Buffers::allocate(bool score_mode) {
   cudaMalloc(&gpu_input_tokens, (size_t)MAX_PROMPT_LEN * sizeof(int));
   cudaMalloc(&gpu_positions,    (size_t)MAX_SEQUENCES * sizeof(int));
   cudaMalloc(&gpu_slots,        (size_t)MAX_SEQUENCES * sizeof(int));
+  cudaMalloc(&prefill_gpu_positions,    (size_t)MAX_PROMPT_LEN * sizeof(int));
+  cudaMalloc(&prefill_gpu_slots,    (size_t)MAX_PROMPT_LEN * sizeof(int));
   cudaMalloc(&hidden_state,     (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
   cudaMalloc(&rms_norms,        (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
 
@@ -216,16 +218,8 @@ int Buffers::allocate(bool score_mode) {
   cudaMalloc(&q_proj,      (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
   cudaMalloc(&k_proj,      (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16));
   cudaMalloc(&v_proj,      (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16));
-  cudaMalloc(&attn_scores, (size_t)MAX_SEQUENCES * NUM_Q_HEADS * MAX_SEQ_LEN * sizeof(bf16));
   cudaMalloc(&attn_out,    (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
   cudaMalloc(&o_proj,      (size_t)MAX_PROMPT_LEN * E_DIM * sizeof(bf16));
-
-  size_t batch_ptrs = (size_t)MAX_SEQUENCES * NUM_K_HEADS;
-  cudaMalloc(&gpu_k_ptrs, (size_t)N_LAYERS * batch_ptrs * sizeof(void*));
-  cudaMalloc(&gpu_v_ptrs, (size_t)N_LAYERS * batch_ptrs * sizeof(void*));
-  cudaMalloc(&gpu_q_ptrs, batch_ptrs * sizeof(void*));
-  cudaMalloc(&gpu_s_ptrs, batch_ptrs * sizeof(void*));
-  cudaMalloc(&gpu_o_ptrs, batch_ptrs * sizeof(void*));
 
   // mlp scratch
   cudaMalloc(&gate, (size_t)MAX_PROMPT_LEN * INTERMEDIATE_DIM * sizeof(bf16));
@@ -255,11 +249,10 @@ int Buffers::allocate(bool score_mode) {
 void Buffers::free() {
   cudaFree(kv_cache); cudaFree(gpu_block_table);
   cudaFree(gpu_input_tokens); cudaFree(gpu_positions); cudaFree(gpu_slots);
+  cudaFree(prefill_gpu_positions); cudaFree(prefill_gpu_slots);
   cudaFree(hidden_state); cudaFree(rms_norms);
   cudaFree(q_proj); cudaFree(k_proj); cudaFree(v_proj);
-  cudaFree(attn_scores); cudaFree(attn_out); cudaFree(o_proj);
-  cudaFree(gpu_k_ptrs); cudaFree(gpu_v_ptrs);
-  cudaFree(gpu_q_ptrs); cudaFree(gpu_s_ptrs); cudaFree(gpu_o_ptrs);
+  cudaFree(attn_out); cudaFree(o_proj);
   cudaFree(gate); cudaFree(up); cudaFree(down);
   cudaFree(logits); cudaFree(gpu_sampled_tokens); cudaFree(gpu_rand);
   cudaFree(gpu_targets); cudaFree(gpu_logprobs);

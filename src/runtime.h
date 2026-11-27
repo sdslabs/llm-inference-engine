@@ -48,27 +48,22 @@ int loadWeights(Weights& weights, std::filesystem::path model_path);
 
 // scratch memory, allocated once at startup and reused by every request
 struct Buffers {
-  bf16* kv_cache = nullptr;             // MAX_SEQUENCES x N_LAYERS x 2 x MAX_SEQ_LEN x KV_DIM
+  bf16* kv_cache = nullptr;             // N_LAYERS * TOTAL_BLOCKS * 2 * NUM_K_HEADS * BLOCK_TOKEN_COUNT * HEAD_DIM
   int* gpu_block_table = nullptr;
 
   int* gpu_input_tokens = nullptr;
   int* gpu_positions = nullptr;         // MAX_SEQUENCES, cache position of each row
   int* gpu_slots = nullptr;
+  int* prefill_gpu_positions = nullptr;
+  int* prefill_gpu_slots = nullptr;
   bf16* hidden_state = nullptr;         // carried across all N_LAYERS
   bf16* rms_norms = nullptr;            // rmsNorm output, never in place
 
   bf16* q_proj = nullptr;
   bf16* k_proj = nullptr;
   bf16* v_proj = nullptr;
-  bf16* attn_scores = nullptr;
-  bf16* attn_out = nullptr;             // scores @ V
+  bf16* attn_out = nullptr;             // softmax(QK^T)V, before o_proj
   bf16* o_proj = nullptr;               // after w_o
-
-  void** gpu_k_ptrs = nullptr;
-  void** gpu_v_ptrs = nullptr;
-  void** gpu_q_ptrs = nullptr;
-  void** gpu_s_ptrs = nullptr;
-  void** gpu_o_ptrs = nullptr;
 
   bf16* gate = nullptr;
   bf16* up = nullptr;
