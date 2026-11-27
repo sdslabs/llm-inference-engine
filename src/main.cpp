@@ -23,6 +23,7 @@
 #include "score.h"
 #include "telemetry.h"
 #include "queue.h"
+#include "block_manager.h"
 
 #include "../external/httplib.h"
 #include "../external/json.hpp"
@@ -85,6 +86,7 @@ void run_engine_loop (
   Recorder& recorder
 ) {
   std::vector<SlotState> slots(MAX_SEQUENCES);
+  BlockManager block_manager(MAX_SEQUENCES, MAX_BLOCKS_PER_SEQ, buf.gpu_block_table);
 
   auto retire_slot = [&](int s, const char* reason) {
     std::string final_text = tokenizer->Decode(slots[s].generated);
@@ -97,6 +99,7 @@ void run_engine_loop (
     }
 
     std::cerr << "[Engine] Slot " << s << " finished (" << reason << ")\n";
+    block_manager.deallocate(s);
     slots[s] = SlotState{};
   };
 
@@ -111,10 +114,15 @@ void run_engine_loop (
       if(!g_request_queue.pop(req, false)) break;
 
       int prompt_len = req.tokens.size();
+      int blocks_required = (prompt_len + BLOCK_TOKEN_COUNT - 1) / BLOCK_TOKEN_COUNT;
+      auto res = block_manager.allocate(s, blocks_required);
+      assert(res == AllocResult::Success && "free stack exhausted: block table accounting is incorrect");
+      block_manager.syncBlockTableToGPU(s);
 
       prefill(req.tokens, prompt_len, s, cfg, weights, cublas_handle, buf, slots);
       
       if(!slots[s].active) {
+        block_manager.deallocate(s);
         if(req.on_token) {
           req.on_token("\n[Error: Request dropped during prefill (likely exceeds max context length)]", true);
         }
@@ -156,8 +164,20 @@ void run_engine_loop (
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
       continue;
     }
-
-    decode(slots, cfg, weights, cublas_handle, buf);
+    
+    DecodeBatch decode_batch;
+    for(int s = 0; s < MAX_SEQUENCES; s++) {
+    if(!slots[s].active) continue;
+      decode_batch.active.push_back(s);
+      decode_batch.batch_tokens.push_back(slots[s].last_token);
+      decode_batch.batch_positions.push_back(slots[s].seq_len); // where this token lands in its cache
+      if((slots[s].seq_len) % BLOCK_TOKEN_COUNT == 0) {
+        auto res = block_manager.allocate(s, 1);
+        assert(res == AllocResult::Success);
+      }
+    }
+    block_manager.syncBlockTableToGPU();
+    decode(slots, cfg, weights, cublas_handle, buf, decode_batch);
 
     recorder.onDecodeStep(slots);
 

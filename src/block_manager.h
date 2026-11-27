@@ -22,11 +22,16 @@ class BlockManager {
   FreeStack free_blocks_;
   int max_sequences_;
   int max_blocks_per_seq_;
+  int* gpu_block_table_;
   std::vector<int> using_count_; //book-keeping data structure which stores how many blocks have been allocated for a certain slot
   std::vector<int> block_table_;
 
   public:
-  BlockManager(int max_sequences, int max_blocks_per_seq);
+  BlockManager(int max_sequences, int max_blocks_per_seq, int* gpu_block_table);
   [[nodiscard]] AllocResult allocate(int slot, int amt);
   void deallocate(int slot);
+
+  // slot = -1 means copy whole block table 
+  // Any other valid non-negative integer input causes only the block table entries for that slot to get copied over to the gpu table
+  void syncBlockTableToGPU(int slot = -1); 
 };

@@ -1,8 +1,8 @@
-//change the build system files
 #include <cassert>
 #include <numeric>
 #include <algorithm>
 #include "block_manager.h"
+#include <cuda_runtime.h>
 
 FreeStack::FreeStack(int sz) : free_stack_(sz), top_(free_stack_.end() - 1) {
     assert(sz > 0);
@@ -30,12 +30,13 @@ void FreeStack::multipush(int amt, int* src) {
     top_ += amt;
 }
 
-BlockManager::BlockManager(int max_sequences, int max_blocks_per_seq)
+BlockManager::BlockManager(int max_sequences, int max_blocks_per_seq, int* gpu_block_table)
     : free_blocks_(max_sequences * max_blocks_per_seq),
       max_sequences_(max_sequences),
       max_blocks_per_seq_(max_blocks_per_seq),
       using_count_(max_sequences, 0),
-      block_table_(max_sequences * max_blocks_per_seq, 0) {}
+      block_table_(max_sequences * max_blocks_per_seq, 0),
+      gpu_block_table_(gpu_block_table) {}
 
 [[nodiscard]] AllocResult BlockManager::allocate(int slot, int amt) { // amt is the number of blocks to allocate
     assert(slot >= 0 && slot < max_sequences_);
@@ -57,4 +58,20 @@ void BlockManager::deallocate(int slot) {
     int* block_table_slot = block_table_.data() + slot * max_blocks_per_seq_;
     free_blocks_.multipush(using_count_[slot], block_table_slot);
     using_count_[slot] = 0;
+}
+
+void BlockManager::syncBlockTableToGPU(int slot) {
+    assert(slot == -1 || slot >= 0 && slot < max_sequences_);
+
+    // add proper cuda error handling later....this is just placeholder code for the time being
+    cudaError_t err;
+    if(slot != -1) {
+        size_t offset =  (size_t)slot * max_blocks_per_seq_;
+        err = cudaMemcpy(gpu_block_table_ + offset, block_table_.data() + offset, max_blocks_per_seq_ * sizeof(int), cudaMemcpyHostToDevice);
+    }
+    else {
+        err = cudaMemcpy(gpu_block_table_, block_table_.data(), block_table_.size() * sizeof(int), cudaMemcpyHostToDevice);
+    }
+
+    assert(err == cudaSuccess && "block table syncing failed");
 }
