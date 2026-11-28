@@ -1,8 +1,8 @@
 #pragma once
+#include "kernels.cuh"
 #include <cublas_v2.h>
 #include <filesystem>
 #include <vector>
-#include "kernels.cuh"
 
 int checkGPUStatus();
 
@@ -29,6 +29,8 @@ struct ModelConfig {
 
 int loadModelConfig(ModelConfig& mc, const std::filesystem::path& model_path);
 
+using fp32 = float;
+
 // pointers to weight matrices on GPU
 struct Weights {
   bf16* embed_tokens;
@@ -44,7 +46,30 @@ struct Weights {
   bf16* norm;
 };
 
+struct QuantizedWeights {
+  bf16* embed_tokens;
+  bf16* input_layernorm[N_LAYERS];
+  int8_t* mlp_gate_proj[N_LAYERS];
+  int8_t* mlp_up_proj[N_LAYERS];
+  int8_t* mlp_down_proj[N_LAYERS];
+  fp32* mlp_gate_proj_scales[N_LAYERS];
+  fp32* mlp_up_proj_scales[N_LAYERS];
+  fp32* mlp_down_proj_scales[N_LAYERS];
+  bf16* post_attn_layernorms[N_LAYERS];
+  int8_t* w_q[N_LAYERS];
+  int8_t* w_k[N_LAYERS];
+  int8_t* w_v[N_LAYERS];
+  int8_t* w_o[N_LAYERS];
+  fp32* w_q_scales[N_LAYERS];
+  fp32* w_k_scales[N_LAYERS];
+  fp32* w_v_scales[N_LAYERS];
+  fp32* w_o_scales[N_LAYERS];
+  bf16* norm;
+};
+
 int loadWeights(Weights& weights, std::filesystem::path model_path);
+int loadWeights_quantized(QuantizedWeights& weights, std::filesystem::path model_path);
+int quantWeights(std::filesystem::path model_path);
 
 // scratch memory, allocated once at startup and reused by every request
 struct Buffers {
