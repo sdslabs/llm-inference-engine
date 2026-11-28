@@ -256,9 +256,6 @@ void addHeaderEntry(const std::string& name,const json& header_json, const std::
 }
 
 int quantWeights(fs::path model_path) {
-  QuantizedWeights quantized_weights{};
-  if(checkGPUStatus()) return 1;
-
   std::ifstream safetensors_file(model_path, std::ios_base::binary);
   if(!safetensors_file.is_open()) {
     std::cerr << "Cannot open weights file\n";
@@ -365,28 +362,6 @@ int quantWeights(fs::path model_path) {
   qt_model_weights_cpu.resize(norm_offset + norm_bytes);
   std::memcpy(qt_model_weights_cpu.data() + norm_offset, model_weights_cpu.data() + norm_start, norm_bytes);
 
-
-  quantized_weights.embed_tokens = (bf16*)(qt_model_weights_cpu.data() + quantized_offsets.at("model.embed_tokens.weight").first);
-  quantized_weights.norm = (bf16*)(qt_model_weights_cpu.data() + quantized_offsets.at("model.norm.weight").first);
-  for (int i = 0; i < N_LAYERS; ++i) {
-    std::string layer = "model.layers." + std::to_string(i) + ".";
-    quantized_weights.input_layernorm[i] = (bf16*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "input_layernorm.weight").first);
-    quantized_weights.post_attn_layernorms[i] = (bf16*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "post_attention_layernorm.weight").first);
-    quantized_weights.mlp_down_proj[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "mlp.down_proj.weight").first);
-    quantized_weights.mlp_down_proj_scales[i] = scales.data() + scale_offsets.at(layer + "mlp.down_proj.weight");
-    quantized_weights.mlp_gate_proj[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "mlp.gate_proj.weight").first);
-    quantized_weights.mlp_gate_proj_scales[i] = scales.data() + scale_offsets.at(layer + "mlp.gate_proj.weight");
-    quantized_weights.mlp_up_proj[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "mlp.up_proj.weight").first);
-    quantized_weights.mlp_up_proj_scales[i] = scales.data() + scale_offsets.at(layer + "mlp.up_proj.weight");
-    quantized_weights.w_k[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "self_attn.k_proj.weight").first);
-    quantized_weights.w_k_scales[i] = scales.data() + scale_offsets.at(layer + "self_attn.k_proj.weight");
-    quantized_weights.w_o[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "self_attn.o_proj.weight").first);
-    quantized_weights.w_o_scales[i] = scales.data() + scale_offsets.at(layer + "self_attn.o_proj.weight");
-    quantized_weights.w_q[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "self_attn.q_proj.weight").first);
-    quantized_weights.w_q_scales[i] = scales.data() + scale_offsets.at(layer + "self_attn.q_proj.weight");
-    quantized_weights.w_v[i] = (int8_t*)(qt_model_weights_cpu.data() + quantized_offsets.at(layer + "self_attn.v_proj.weight").first);
-    quantized_weights.w_v_scales[i] = scales.data() + scale_offsets.at(layer + "self_attn.v_proj.weight");
-  }
   std::vector<header_entry> header_package;
 
 
